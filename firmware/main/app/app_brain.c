@@ -228,9 +228,11 @@ static void brain_task(void *arg)
                 .path = "/",
                 .transport = WEBSOCKET_TRANSPORT_OVER_TCP,
                 .buffer_size = 4096,
-                .network_timeout_ms = 10000,
+                .network_timeout_ms = 60000,
                 .reconnect_timeout_ms = 3000,
                 .disable_auto_reconnect = false,
+                .ping_interval_sec = 20,
+                .pingpong_timeout_sec = 120,
             };
             s_ws = esp_websocket_client_init(&cfg);
             if (!s_ws) {

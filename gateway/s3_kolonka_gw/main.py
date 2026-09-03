@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import websockets
+import websockets.exceptions
 import yaml
 
 from s3_kolonka_gw.adapters import create_backend
@@ -55,6 +56,8 @@ async def session(ws, path, cfg):
                 await backend.stop()
             else:
                 await on_status("error", "unknown type")
+    except websockets.exceptions.ConnectionClosed as exc:
+        log.info("client %s disconnected: %s", peer, exc)
     finally:
         await backend.close()
         log.info("client %s closed", peer)
@@ -86,7 +89,15 @@ def main():
         async def handler(ws, path):
             await session(ws, path, cfg)
 
-        async with websockets.serve(handler, host, port, max_size=2 ** 20, ping_interval=20):
+        async with websockets.serve(
+            handler,
+            host,
+            port,
+            max_size=2 ** 20,
+            max_queue=256,
+            ping_interval=20,
+            ping_timeout=60,
+        ):
             await asyncio.Future()
 
     asyncio.run(run())

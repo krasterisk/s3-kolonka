@@ -49,6 +49,7 @@ class GroqBackend(VoiceBackend):
         self._busy = False
         self._buf = bytearray()
         self._history = []
+        self._turn_task = None
         self._reset_vad()
 
     def _reset_vad(self):
@@ -66,6 +67,7 @@ class GroqBackend(VoiceBackend):
         if not self.api_key:
             await self.status("error", "groq: no api_key")
             return
+        await self.close()
         self._listening = True
         self._busy = False
         self._buf.clear()
@@ -106,10 +108,22 @@ class GroqBackend(VoiceBackend):
         pcm = bytes(self._buf)
         self._buf.clear()
         self._reset_vad()
+        self._turn_task = asyncio.create_task(self._run_turn(pcm), name="gw-turn")
+
+    async def _run_turn(self, pcm: bytes):
         try:
             await self._finish_turn(pcm)
         finally:
             self._busy = False
+
+    async def close(self):
+        task = self._turn_task
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def _finish_turn(self, pcm: bytes):
         if not self.api_key:
@@ -154,9 +168,14 @@ class GroqBackend(VoiceBackend):
 
         on_pcm = getattr(self, "_on_pcm", None)
         if on_pcm and audio:
-            for i in range(0, len(audio), _CHUNK):
-                await on_pcm(audio[i : i + _CHUNK])
-                await asyncio.sleep(0.018)
+            try:
+                for i in range(0, len(audio), _CHUNK):
+                    await on_pcm(audio[i : i + _CHUNK])
+                    await asyncio.sleep(0.018)
+            except Exception as exc:
+                log.warning("tts send failed: %s", exc)
+                await self.status("error", "tts send failed")
+                return
         await self.status("idle", "groq")
 
     def _headers(self, extra=None):
