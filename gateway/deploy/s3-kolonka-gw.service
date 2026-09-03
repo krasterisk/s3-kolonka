@@ -1,0 +1,17 @@
+[Unit]
+Description=s3-kolonka voice gateway
+After=network-online.target
+# Independent of Home Assistant / Docker.
+
+[Service]
+Type=simple
+User=cubie
+Group=cubie
+WorkingDirectory=/home/cubie/s3-kolonka-gw
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/cubie/s3-kolonka-gw/.venv/bin/python -m s3_kolonka_gw
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

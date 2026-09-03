@@ -1,0 +1,33 @@
+# s3-kolonka gateway — lives on Cubie, not on the speaker.
+# Do not bind 8123 / 1900 / 5353 (Home Assistant).
+
+listen: "0.0.0.0"
+port: 8765
+
+# groq | mock | gemini | aipbx | xiaozhi
+backend: groq
+
+groq:
+  api_key: ""
+  stt_model: "whisper-large-v3-turbo"
+  llm_model: "openai/gpt-oss-20b"
+  voice: "ru-RU-SvetlanaNeural"
+  tts_model: "playai-tts"
+  tts_voice: "Celeste-PlayAI"
+  espeak_voice: "ru"
+  piper_model: "/opt/s3-kolonka-gw/voices/ru_RU-irina-medium.onnx"
+  # Cubie/RU is Cloudflare-blocked; run deploy/groq_proxy.py on a PC that can reach Groq.
+  proxy: ""
+
+gemini:
+  api_key: ""
+  model: "gemini-live-2.5-flash-native-audio"
+
+aipbx:
+  url: ""
+  assistant_id: ""
+  token: ""
+
+xiaozhi:
+  url: ""
+  token: ""

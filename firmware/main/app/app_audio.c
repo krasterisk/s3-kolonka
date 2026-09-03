@@ -1,0 +1,283 @@
+#include "app_audio.h"
+
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+#include "driver/gpio.h"
+#include "esp_board_init.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+
+#define PA_GPIO GPIO_NUM_15
+#define SAMPLE_RATE 16000
+#define MIC_CHANNELS 4
+
+static const char *TAG = "audio";
+static int s_volume = 50;
+static volatile bool s_listen;
+static volatile bool s_playing;
+static volatile int s_mic_level;
+static volatile int s_listen_frames;
+static volatile int s_silence_frames;
+static volatile bool s_speech_seen;
+static SemaphoreHandle_t s_i2s;
+static app_audio_mic_sink_t s_mic_sink;
+
+static void pa_on(void)
+{
+    gpio_set_level(PA_GPIO, 1);
+}
+
+static void pa_off(void)
+{
+    gpio_set_level(PA_GPIO, 0);
+}
+
+static int32_t *alloc_pcm(size_t bytes)
+{
+    int32_t *buf = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!buf) {
+        buf = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (!buf) {
+        buf = malloc(bytes);
+    }
+    return buf;
+}
+
+static void write_silence(int ms)
+{
+    const int frames = SAMPLE_RATE * ms / 1000;
+    const size_t bytes = (size_t)frames * 2 * sizeof(int32_t);
+    int32_t *z = alloc_pcm(bytes);
+    if (!z) {
+        return;
+    }
+    memset(z, 0, bytes);
+    esp_audio_play((int16_t *)z, (int)bytes, portMAX_DELAY);
+    free(z);
+}
+
+static void play_tone(int hz, int ms, float amp)
+{
+    const int fade = SAMPLE_RATE * 20 / 1000;
+    const int frames = SAMPLE_RATE * ms / 1000;
+    const size_t bytes = (size_t)frames * 2 * sizeof(int32_t);
+    int32_t *buf = alloc_pcm(bytes);
+    if (!buf) {
+        return;
+    }
+
+    for (int i = 0; i < frames; i++) {
+        float env = 1.0f;
+        if (i < fade) {
+            env = (float)i / (float)fade;
+        } else if (i > frames - fade) {
+            env = (float)(frames - i) / (float)fade;
+        }
+        float s = sinf(2.0f * (float)M_PI * (float)hz * (float)i / (float)SAMPLE_RATE);
+        int32_t v = (int32_t)(s * env * amp * 1400000000.0f);
+        buf[2 * i] = v;
+        buf[2 * i + 1] = v;
+    }
+
+    if (s_i2s) {
+        xSemaphoreTake(s_i2s, portMAX_DELAY);
+    }
+    s_playing = true;
+    pa_on();
+    vTaskDelay(pdMS_TO_TICKS(15));
+    esp_audio_play((int16_t *)buf, (int)bytes, portMAX_DELAY);
+    free(buf);
+    write_silence(60);
+    pa_off();
+    s_playing = false;
+    if (s_i2s) {
+        xSemaphoreGive(s_i2s);
+    }
+}
+
+void app_audio_beep(int hz, int ms)
+{
+    play_tone(hz, ms, 0.25f);
+}
+
+void app_audio_chime(void)
+{
+    play_tone(660, 90, 0.22f);
+    play_tone(880, 140, 0.22f);
+}
+
+void app_audio_set_volume(int percent)
+{
+    if (percent < 0) {
+        percent = 0;
+    }
+    if (percent > 100) {
+        percent = 100;
+    }
+    s_volume = percent;
+    esp_audio_set_play_vol(percent);
+}
+
+int app_audio_get_volume(void)
+{
+    return s_volume;
+}
+
+bool app_audio_is_listening(void)
+{
+    return s_listen;
+}
+
+int app_audio_mic_level(void)
+{
+    return s_mic_level;
+}
+
+void app_audio_set_listen(bool on)
+{
+    s_listen = on;
+    s_listen_frames = 0;
+    s_silence_frames = 0;
+    s_speech_seen = false;
+    if (!on) {
+        s_mic_level = 0;
+    }
+}
+
+static void mic_task(void *arg)
+{
+    (void)arg;
+    const int frames = 160;
+    const int bytes = frames * MIC_CHANNELS * (int)sizeof(int16_t);
+    int16_t *buf = heap_caps_malloc((size_t)bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        buf = malloc((size_t)bytes);
+    }
+    if (!buf) {
+        ESP_LOGE(TAG, "mic buffer alloc failed");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    while (1) {
+        if (!s_listen) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        if (esp_get_feed_data(true, buf, bytes) != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
+        int64_t acc = 0;
+        int n = frames * 2;
+        for (int i = 0; i < frames; i++) {
+            int16_t a = buf[MIC_CHANNELS * i + 0];
+            int16_t b = buf[MIC_CHANNELS * i + 1];
+            acc += (int32_t)a * a + (int32_t)b * b;
+        }
+        float rms = sqrtf((float)acc / (float)n);
+        int level = (int)(rms / 80.0f);
+        if (level > 100) {
+            level = 100;
+        }
+        s_mic_level = level;
+
+        if (!s_playing) {
+            s_listen_frames++;
+            if (s_listen_frames > 40) {
+                if (level >= 16) {
+                    s_speech_seen = true;
+                    s_silence_frames = 0;
+                } else if (s_speech_seen) {
+                    s_silence_frames++;
+                    if (s_silence_frames >= 120) {
+                        s_listen = false;
+                        s_mic_level = 0;
+                    }
+                }
+            }
+            if (s_listen_frames >= 1200) {
+                s_listen = false;
+                s_mic_level = 0;
+            }
+        }
+
+        if (s_mic_sink && !s_playing && s_listen) {
+            int16_t mono[160];
+            for (int i = 0; i < frames; i++) {
+                int32_t mix = (int32_t)buf[MIC_CHANNELS * i + 0] + (int32_t)buf[MIC_CHANNELS * i + 1];
+                mono[i] = (int16_t)(mix / 2);
+            }
+            s_mic_sink(mono, frames);
+        }
+    }
+}
+
+void app_audio_set_mic_sink(app_audio_mic_sink_t sink)
+{
+    s_mic_sink = sink;
+}
+
+bool app_audio_is_playing(void)
+{
+    return s_playing;
+}
+
+void app_audio_play_pcm16(const int16_t *stereo, int samples)
+{
+    if (!stereo || samples <= 0) {
+        return;
+    }
+    if (s_i2s) {
+        xSemaphoreTake(s_i2s, portMAX_DELAY);
+    }
+    if (!s_playing) {
+        pa_on();
+        vTaskDelay(pdMS_TO_TICKS(10));
+        s_playing = true;
+    }
+    esp_audio_play(stereo, samples * (int)sizeof(int16_t), portMAX_DELAY);
+    if (s_i2s) {
+        xSemaphoreGive(s_i2s);
+    }
+}
+
+void app_audio_play_end(void)
+{
+    if (s_i2s) {
+        xSemaphoreTake(s_i2s, portMAX_DELAY);
+    }
+    if (s_playing) {
+        write_silence(40);
+        pa_off();
+        s_playing = false;
+    }
+    if (s_i2s) {
+        xSemaphoreGive(s_i2s);
+    }
+}
+
+void app_audio_start(void)
+{
+    gpio_reset_pin(PA_GPIO);
+    gpio_set_direction(PA_GPIO, GPIO_MODE_OUTPUT);
+    pa_off();
+    s_i2s = xSemaphoreCreateMutex();
+
+    app_audio_set_volume(s_volume);
+    xTaskCreatePinnedToCore(mic_task, "mic", 4096, NULL, 4, NULL, 1);
+    app_audio_chime();
+    ESP_LOGI(TAG, "audio ready, volume=%d", s_volume);
+}

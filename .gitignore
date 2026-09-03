@@ -1,0 +1,33 @@
+# ESP-IDF
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+.cache/
+
+# IDE
+.vscode/
+.idea/
+*.user
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Local secrets / Wi-Fi
+secrets.h
+.env
+*.pem
+
+# Gateway runtime
+gateway/.venv/
+gateway/config.yaml
+gateway/voices/
+__pycache__/
+*.pyc
+*.onnx
+
+# Waveshare dump (~230 MB); board drivers live in firmware/main
+vendor/
