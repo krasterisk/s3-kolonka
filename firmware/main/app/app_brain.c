@@ -15,14 +15,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
 
-#ifndef BRAIN_HOST
-#define BRAIN_HOST "202.71.12.193"
-#endif
-#ifndef BRAIN_PORT
-#define BRAIN_PORT 8765
-#endif
-#define BRAIN_URI "ws://" BRAIN_HOST ":8765/"
+#define BRAIN_HOST CONFIG_KOLONKA_BRAIN_HOST
+#define BRAIN_PORT CONFIG_KOLONKA_BRAIN_PORT
 
 static const char *TAG = "brain";
 static esp_websocket_client_handle_t s_ws;
@@ -32,8 +28,15 @@ static volatile bool s_end_listen;
 static bool s_listen_sent;
 static char s_status[48] = "Brain: wait";
 static char s_backend[16] = "gw";
+static char s_brain_uri[96];
 static RingbufHandle_t s_play_rb;
 static RingbufHandle_t s_up_rb;
+
+static const char *brain_uri(void)
+{
+    snprintf(s_brain_uri, sizeof(s_brain_uri), "ws://%s:%d/", BRAIN_HOST, BRAIN_PORT);
+    return s_brain_uri;
+}
 
 static void set_status(const char *text)
 {
@@ -217,9 +220,9 @@ static void brain_task(void *arg)
         if (!s_ws) {
             set_status("Brain: connecting");
             wait_ticks = 0;
-            ESP_LOGI(TAG, "ws start heap=%u uri=%s", (unsigned)esp_get_free_heap_size(), BRAIN_URI);
+            ESP_LOGI(TAG, "ws start heap=%u uri=%s", (unsigned)esp_get_free_heap_size(), brain_uri());
             esp_websocket_client_config_t cfg = {
-                .uri = BRAIN_URI,
+                .uri = s_brain_uri,
                 .host = BRAIN_HOST,
                 .port = BRAIN_PORT,
                 .path = "/",

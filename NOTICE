@@ -1,0 +1,17 @@
+s3-kolonka
+Copyright (c) 2026 s3-kolonka contributors
+
+This product includes software developed by third parties:
+
+  * Espressif IoT Development Framework (Apache-2.0)
+    https://github.com/espressif/esp-idf
+  * LVGL (MIT)
+    https://github.com/lvgl/lvgl
+  * Waveshare ESP32-S3-Touch-LCD-1.85C example drivers
+    (display ST77916, touch CST816, EXIO, board bring-up).
+    Used as hardware initialization, not as an application fork.
+  * Piper voices (separately downloaded, not shipped in this repository)
+    https://github.com/rhasspy/piper
+
+Board support component directory `firmware/components/auido_borad`
+keeps the upstream spelling from the Waveshare example.

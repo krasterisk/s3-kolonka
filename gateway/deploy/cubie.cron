@@ -1,1 +1,0 @@
-@reboot sleep 25 && cd /home/cubie/s3-kolonka-gw && .venv/bin/python -m s3_kolonka_gw >> gw.log 2>&1

@@ -1,0 +1,45 @@
+name: Bug report
+description: Something is broken on the speaker or gateway
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Do not paste API keys, `config.yaml`, or production hostnames.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Firmware / speaker
+        - Gateway
+        - Protocol
+        - Docs
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      placeholder: Waveshare ESP32-S3-Touch-LCD-1.85C V2 BOX
+  - type: input
+    id: idf
+    attributes:
+      label: ESP-IDF version
+      placeholder: v5.5.2
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Expected vs actual. Include sanitized logs.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Tap Listen
+        2. Speak
+        3. Wait for auto-stop
+    validations:
+      required: true

@@ -9,7 +9,10 @@ dependencies.lock
 # IDE
 .vscode/
 .idea/
+.clangd
+compile_commands.json
 *.user
+.venv/
 
 # OS
 Thumbs.db
@@ -25,9 +28,12 @@ secrets.h
 gateway/.venv/
 gateway/config.yaml
 gateway/voices/
+gateway/deploy/private/
 __pycache__/
 *.pyc
+*.egg-info/
 *.onnx
+*.log
 
 # Waveshare dump (~230 MB); board drivers live in firmware/main
 vendor/

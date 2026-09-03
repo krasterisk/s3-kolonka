@@ -1,5 +1,5 @@
-# s3-kolonka gateway — lives on Cubie, not on the speaker.
-# Do not bind 8123 / 1900 / 5353 (Home Assistant).
+# Copy to config.yaml (gitignored) and fill secrets locally.
+# Do not bind 8123 / 1900 / 5353 if Home Assistant shares the host.
 
 listen: "0.0.0.0"
 port: 8765
@@ -12,11 +12,11 @@ groq:
   stt_model: "whisper-large-v3-turbo"
   llm_model: "openai/gpt-oss-20b"
   voice: "ru-RU-SvetlanaNeural"
-  tts_model: "playai-tts"
-  tts_voice: "Celeste-PlayAI"
+  tts_model: "canopylabs/orpheus-v1-english"
+  tts_voice: "tara"
   espeak_voice: "ru"
   piper_model: "/opt/s3-kolonka-gw/voices/ru_RU-irina-medium.onnx"
-  # Cubie/RU is Cloudflare-blocked; run deploy/groq_proxy.py on a PC that can reach Groq.
+  # Optional HTTP(S) proxy if the gateway host cannot reach api.groq.com.
   proxy: ""
 
 gemini:

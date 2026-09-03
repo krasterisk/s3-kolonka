@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HTTPS CONNECT proxy. Cubie cannot reach api.groq.com (Cloudflare 403 / RU)."""
+"""Tiny HTTPS CONNECT proxy for api.groq.com (geo / Cloudflare blocks)."""
 
 import select
 import socket

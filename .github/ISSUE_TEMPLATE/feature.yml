@@ -1,0 +1,29 @@
+name: Feature request
+description: Propose a change that fits the thin-client design
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is hard or missing today?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Proposal
+      description: Keep STT/LLM/TTS on the gateway unless there is a strong reason not to.
+    validations:
+      required: true
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Where it belongs
+      options:
+        - Firmware
+        - Gateway adapter
+        - Both
+        - Unsure
+    validations:
+      required: true

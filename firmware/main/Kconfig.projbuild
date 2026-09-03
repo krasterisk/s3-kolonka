@@ -1,18 +1,31 @@
-menu "Example Configuration"
+menu "s3-kolonka"
+
+    config KOLONKA_BRAIN_HOST
+        string "Voice gateway host"
+        default "192.168.1.10"
+        help
+            IPv4 or hostname of the WebSocket gateway.
+            Keep production addresses in local sdkconfig, not in git.
+
+    config KOLONKA_BRAIN_PORT
+        int "Voice gateway port"
+        default 8765
+        range 1 65535
+
     config LV_MEM_SIZE_KILOBYTES
-        int "Size of the memory used by `lv_mem_alloc` in kilobytes (>= 2kB)"
+        int "Size of the memory used by lv_mem_alloc in kilobytes (>= 2kB)"
         default 48
+
     config BT_ENABLED
         bool "Select this option to enable Bluetooth"
-        default y 
+        default y
 
     config BT_BLE_50_FEATURES_SUPPORTED
         bool "Enabling this option activates BLE 5.0 features"
-        default y 
-        
+        default y
+
     config BT_BLE_42_FEATURES_SUPPORTED
         bool "This enables BLE 4.2 features."
-        default y 
-    
+        default y
 
 endmenu
