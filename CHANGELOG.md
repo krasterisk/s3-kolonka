@@ -22,6 +22,7 @@ and this project uses [Semantic Versioning](https://semver.org/) after 1.0.0.
 - Radio play uses the URL after HTTP redirects so the speaker does not start an empty 301 body
 - Radio audio is decoded on the gateway and played as PCM16 on the speaker
 - Speaker echo uses ESP-SR AFE AEC only (no WakeNet); Hey Jarvis still runs after AEC. Falls back to the one-tap canceller if AFE fails to start
+- Factory app partition is 4M so the AFE library fits on the 16MB flash
 
 ## [0.1.0] - 2026-09-03
 

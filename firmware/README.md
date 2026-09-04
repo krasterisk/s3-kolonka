@@ -33,3 +33,4 @@ idf.py -p <PORT> flash monitor
 - Wake is on-device Hey Jarvis (microWakeWord). Echo cancellation is ESP-SR
   AFE AEC only — WakeNet stays off. If AFE fails to start, the one-tap
   canceller in `app/aec.c` is used instead
+- `partitions.csv` factory app is 4M (ESP-SR AEC does not fit in 3M)
