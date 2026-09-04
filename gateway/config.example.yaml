@@ -43,3 +43,10 @@ radio:
   bitrate_min: 128
   country_hint: RU
   limit: 8
+
+# YouTube / YouTube Music audio (search + yt-dlp on this host, PCM to the speaker).
+youtube:
+  enabled: true
+  cache_dir: "/var/cache/s3-kolonka-yt"
+  search_limit: 5
+  search_timeout: 20

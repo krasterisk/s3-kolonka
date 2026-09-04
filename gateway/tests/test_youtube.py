@@ -1,0 +1,85 @@
+import unittest
+
+from s3_kolonka_gw import youtube
+from s3_kolonka_gw.device_ctrl import (
+    attach_music_play,
+    music_play_query,
+    radio_play_query,
+)
+
+
+class MusicIntentTest(unittest.TestCase):
+    def test_music_query_from_spoken_request(self):
+        self.assertEqual(music_play_query("Включи песню Кино группа крови"), "кино группа крови")
+        self.assertEqual(music_play_query("поставь трек beatles yesterday"), "beatles yesterday")
+        self.assertEqual(music_play_query("включи клип группа крови"), "группа крови")
+        self.assertEqual(music_play_query("включи на ютубе кино"), "кино")
+        self.assertIsNone(music_play_query("включи радио рок-фм"))
+        self.assertIsNone(music_play_query("выключи музыку"))
+
+    def test_radio_query_ignores_songs(self):
+        self.assertIsNone(radio_play_query("включи песню кино"))
+        self.assertEqual(radio_play_query("включи радио рок-фм"), "рок-фм")
+
+    def test_attach_music_play(self):
+        def pick(query):
+            self.assertEqual(query, "кино группа крови")
+            return {
+                "video_id": "abc123",
+                "title": "Кино — Группа крови",
+                "url": "yt://abc123",
+            }
+
+        cmds, err = attach_music_play([], "включи песню кино группа крови", pick)
+        self.assertIsNone(err)
+        self.assertEqual(cmds[0]["name"], "radio_play")
+        self.assertEqual(cmds[0]["url"], "pcm://")
+        self.assertEqual(cmds[0]["source"], "yt://abc123")
+        self.assertEqual(cmds[0]["title"], "Кино — Группа крови")
+
+    def test_attach_music_missing(self):
+        cmds, err = attach_music_play([], "включи песню ноунейм", lambda q: None)
+        self.assertEqual(cmds, [])
+        self.assertIn("наш", err.lower())
+
+
+class YoutubeSearchTest(unittest.TestCase):
+    def test_parse_ytdlp_search_lines(self):
+        raw = "dQw4w9WgXcQ\tRick Astley - Never Gonna Give You Up\nxyz\tOther\n"
+        got = youtube.parse_search_lines(raw)
+        self.assertEqual(got[0]["video_id"], "dQw4w9WgXcQ")
+        self.assertIn("Rick", got[0]["title"])
+        self.assertEqual(got[0]["url"], "yt://dQw4w9WgXcQ")
+
+    def test_resolve_uses_injected_search(self):
+        def search(query, _cfg):
+            self.assertEqual(query, "кино группа крови")
+            return [
+                {"video_id": "vid1", "title": "Кино — Группа крови", "url": "yt://vid1"},
+                {"video_id": "vid2", "title": "Cover", "url": "yt://vid2"},
+            ]
+
+        picked = youtube.resolve_track("кино группа крови", search_fn=search)
+        self.assertEqual(picked["video_id"], "vid1")
+        self.assertEqual(picked["url"], "yt://vid1")
+
+    def test_watch_url_and_pcm_cmds(self):
+        self.assertEqual(youtube.watch_url("dQw4w9WgXcQ"), "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        ytdlp, ff = youtube.youtube_pcm_cmds("yt://dQw4w9WgXcQ", ytdlp="/bin/yt-dlp", ffmpeg="/bin/ffmpeg")
+        self.assertEqual(ytdlp[0], "/bin/yt-dlp")
+        self.assertIn("https://www.youtube.com/watch?v=dQw4w9WgXcQ", ytdlp)
+        self.assertIn("-o", ytdlp)
+        self.assertIn("-", ytdlp)
+        self.assertEqual(ff[0], "/bin/ffmpeg")
+        self.assertIn("s16le", ff)
+        self.assertIn("pipe:1", ff)
+
+    def test_cache_path_uses_id(self):
+        cfg = youtube.normalize_config({"cache_dir": "/tmp/yt-test"})
+        path = youtube.cache_path("AbC-12", cfg)
+        self.assertTrue(str(path).endswith("AbC-12"))
+        self.assertIn("yt-test", str(path))
+
+
+if __name__ == "__main__":
+    unittest.main()

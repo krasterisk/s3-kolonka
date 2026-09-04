@@ -1,6 +1,7 @@
 import re
 
 from s3_kolonka_gw import radio
+from s3_kolonka_gw import youtube
 
 TOOLS = [
     {
@@ -92,8 +93,30 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "play_music",
+            "description": (
+                "Play a song, artist, or YouTube clip by spoken name "
+                "(Кино Группа крови, Beatles Yesterday). "
+                "The server searches YouTube Music and streams audio only. "
+                "Do not invent video IDs or URLs. Not for radio stations."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Song, artist, or clip as spoken, not a URL.",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "stop_radio",
-            "description": "Stop internet radio playback.",
+            "description": "Stop radio or YouTube music playback.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -150,7 +173,11 @@ def heuristic_commands(text: str, vol: int, bl: int) -> list[dict]:
         bl = clamp(bl - 20, 5, 100)
         cmds.append({"name": "brightness", "value": bl})
 
-    if re.search(r"выключи\s+радио|стоп\s+радио|останови\s+радио", t):
+    if re.search(
+        r"выключи\s+радио|стоп\s+радио|останови\s+радио|выключи\s+музык|"
+        r"стоп\s+музык|останови\s+песн|выключи\s+песн",
+        t,
+    ):
         cmds.append({"name": "radio_stop"})
 
     if re.search(r"включись|проснись|очнись|включи\s+экран", t):
@@ -161,7 +188,15 @@ def heuristic_commands(text: str, vol: int, bl: int) -> list[dict]:
 
 
 _RADIO_STOP = re.compile(
-    r"выключи\s+радио|стоп\s+радио|останови\s+радио|выруби\s+радио"
+    r"выключи\s+радио|стоп\s+радио|останови\s+радио|выруби\s+радио|"
+    r"выключи\s+музык|стоп\s+музык|останови\s+песн|выключи\s+песн"
+)
+_MUSIC_PLAY = re.compile(
+    r"(?:включ(?:и|ить|ай)|поставь|играй|запусти)\s+"
+    r"(?:на\s+)?(?:песн[ауию]|трек|клип|музык[ауи]|ютуб[еа]?|youtube)\s+"
+    r"(?:на\s+(?:ютуб[еа]?|youtube)\s+)?"
+    r"(.*)$",
+    re.IGNORECASE | re.DOTALL,
 )
 _RADIO_PLAY = re.compile(
     r"(?:включ(?:и|ить|ай)|поставь|играй|запусти)\s+(?:радио\s*)?(.*)$",
@@ -172,12 +207,30 @@ _NOT_STATION = re.compile(
 )
 
 
+def music_play_query(text: str) -> str | None:
+    t = (text or "").strip()
+    if not t:
+        return None
+    low = t.lower()
+    if _RADIO_STOP.search(low):
+        return None
+    m = _MUSIC_PLAY.search(low)
+    if not m:
+        return None
+    query = (m.group(1) or "").strip(" \t.!?,…«»\"'")
+    if _NOT_STATION.search(query):
+        return None
+    return query
+
+
 def radio_play_query(text: str) -> str | None:
     t = (text or "").strip()
     if not t:
         return None
     low = t.lower()
     if _RADIO_STOP.search(low):
+        return None
+    if music_play_query(t) is not None:
         return None
     m = _RADIO_PLAY.search(low)
     if not m:
@@ -186,6 +239,20 @@ def radio_play_query(text: str) -> str | None:
     if _NOT_STATION.search(query):
         return None
     return query
+
+
+def attach_music_play(cmds: list[dict], user_text: str, pick_fn) -> tuple[list[dict], str | None]:
+    cmds = list(cmds or [])
+    if any(c.get("name") == "radio_play" for c in cmds):
+        return cmds, None
+    query = music_play_query(user_text)
+    if query is None:
+        return cmds, None
+    picked = pick_fn(query or user_text)
+    if not picked or not (picked.get("url") or picked.get("video_id")):
+        return cmds, "Не нашла трек. Назовите песню или исполнителя."
+    cmds.append(youtube.device_music_cmd(picked))
+    return cmds, None
 
 
 def attach_radio_play(cmds: list[dict], user_text: str, pick_fn) -> tuple[list[dict], str | None]:

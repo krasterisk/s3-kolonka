@@ -28,6 +28,17 @@ rejected so a Home Assistant host is not stomped by accident.
 `deploy/install_piper.sh` downloads `ru_RU-irina-medium` into `voices/`
 (gitignored).
 
+## YouTube audio
+
+Songs go through the same PCM path as radio. The gateway searches YouTube
+Music (`ytmusicapi`, fallback `yt-dlp ytsearch`), extracts audio with
+`yt-dlp`, and `ffmpeg` emits PCM16 mono 16 kHz. The speaker only receives
+`radio_play` with `url=pcm://`. Repeat plays can use `youtube.cache_dir`.
+
+Install `yt-dlp` and `ytmusicapi` on the gateway host (already in
+`requirements.txt`) and keep `yt-dlp` updated — YouTube extraction breaks
+when Google changes player clients.
+
 ## Tests
 
 ```bash

@@ -42,7 +42,7 @@ ends the turn (silence / max length).
 `thinking`, `speaking`, `idle`, `radio`, and `error` end the listen UI on the device.
 `live`, `idle`, and `radio` clear leftover Home `heard` / `reply` text. The station title is shown on Media only.
 
-`radio_play` must be HTTP(S) MP3 Icecast. HLS / m3u8 is rejected. Radio and TTS never share the DAC. The gateway probes each candidate, follows HTTP redirects, then decodes the Icecast stream to PCM16 mono 16 kHz and sends it as binary frames. `radio_play` uses `url=pcm://` so the speaker does not open Icecast itself. A device `radio_stop` text frame stops the relay. Search is by name, known aliases, and genre tags (not exact name only). If nothing close is found, the device is not started and the user is asked to clarify.
+`radio_play` uses `url=pcm://` so the speaker never opens Icecast or YouTube itself. For radio the gateway probes MP3 Icecast, follows redirects, and decodes to PCM16 mono 16 kHz. For a song the gateway searches YouTube Music on the server, extracts audio with yt-dlp, and decodes the same PCM path. HLS / m3u8 Icecast is rejected. Radio, YouTube audio, and TTS never share the DAC. A device `radio_stop` text frame stops the relay. Radio search is by name, aliases, and genre tags. If nothing close is found, the device is not started and the user is asked to clarify.
 
 Wake words (when `mode=wake`): «колонка», «слушай», «kolonka», «проснись».
 A tap Listen still processes speech without a wake word.

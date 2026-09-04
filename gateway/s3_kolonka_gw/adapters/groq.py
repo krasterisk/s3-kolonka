@@ -10,11 +10,13 @@ from s3_kolonka_gw.adapters.base import VoiceBackend
 from s3_kolonka_gw.device_ctrl import (
     TOOLS,
     apply_tool,
+    attach_music_play,
     attach_radio_play,
     heuristic_commands,
     spoken_ack,
 )
 from s3_kolonka_gw import radio
+from s3_kolonka_gw import youtube
 from s3_kolonka_gw.pcmutil import (
     RADIO_FRAME_BYTES,
     audio_to_pcm16,
@@ -42,21 +44,23 @@ _SYSTEM = (
     "без списков и разметки. Одно-три предложения. "
     "Если просят громкость, яркость, выключить или включить колонку — "
     "вызови соответствующую функцию. "
-    "Если просят включить радио, станцию или жанр — вызови play_radio "
-    "с тем, как сказал пользователь. Выключить радио — stop_radio. "
-    "Не выдумывай названия станций и URL. "
+    "Если просят включить радио, станцию или жанр — вызови play_radio. "
+    "Если просят песню, исполнителя, клип или YouTube — вызови play_music. "
+    "Выключить радио или музыку — stop_radio. "
+    "Не выдумывай названия станций, треков и URL. "
     "Если инструмент вернул ask — озвучь этот вопрос. "
-    "Если станции нет — попроси уточнить название или жанр."
+    "Если станции или трека нет — попроси уточнить."
 )
 
 
 class GroqBackend(VoiceBackend):
     name = "groq"
 
-    def __init__(self, cfg=None, radio_cfg=None):
+    def __init__(self, cfg=None, radio_cfg=None, youtube_cfg=None):
         cfg = cfg or {}
         self.api_key = (cfg.get("api_key") or os.environ.get("GROQ_API_KEY") or "").strip()
         self.radio_cfg = radio.normalize_config(radio_cfg)
+        self.youtube_cfg = youtube.normalize_config(youtube_cfg)
         self.stt_model = cfg.get("stt_model") or "whisper-large-v3-turbo"
         self.llm_model = cfg.get("llm_model") or "openai/gpt-oss-20b"
         self.voice = cfg.get("voice") or "ru-RU-SvetlanaNeural"
@@ -71,6 +75,7 @@ class GroqBackend(VoiceBackend):
         self._history = []
         self._turn_task = None
         self._radio_proc = None
+        self._ytdlp_proc = None
         self._gen = 0
         self._pcm_epoch = -1
         self._mode = "tap"
@@ -180,31 +185,20 @@ class GroqBackend(VoiceBackend):
         await self.status("idle", "groq", reply="Радио выключено.")
 
     async def _kill_radio(self):
-        proc = self._radio_proc
+        procs = [self._radio_proc, self._ytdlp_proc]
         self._radio_proc = None
-        if not proc:
-            return
-        if proc.returncode is None:
-            proc.kill()
-            try:
-                await proc.wait()
-            except Exception:
-                pass
+        self._ytdlp_proc = None
+        for proc in procs:
+            if not proc:
+                continue
+            if proc.returncode is None:
+                proc.kill()
+                try:
+                    await proc.wait()
+                except Exception:
+                    pass
 
-    async def _stream_radio(self, url: str):
-        try:
-            cmd = ffmpeg_radio_cmd(url)
-        except Exception as exc:
-            log.warning("radio ffmpeg cmd: %s", exc)
-            await self.status("error", "radio decode: %s" % exc)
-            return
-        log.info("radio ffmpeg %s", url)
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        self._radio_proc = proc
+    async def _pump_pcm(self, proc):
         on_pcm = getattr(self, "_on_pcm", None)
         started = None
         sent = 0
@@ -233,6 +227,62 @@ class GroqBackend(VoiceBackend):
             if dropped:
                 log.info("radio drop %s frames to stay live", dropped)
             await self._kill_radio()
+
+    async def _stream_radio(self, url: str):
+        if youtube.is_youtube_source(url):
+            await self._stream_youtube(url)
+            return
+        try:
+            cmd = ffmpeg_radio_cmd(url)
+        except Exception as exc:
+            log.warning("radio ffmpeg cmd: %s", exc)
+            await self.status("error", "radio decode: %s" % exc)
+            return
+        log.info("radio ffmpeg %s", url)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        self._radio_proc = proc
+        await self._pump_pcm(proc)
+
+    async def _stream_youtube(self, source: str):
+        cached = youtube.cached_file(source, self.youtube_cfg)
+        try:
+            if cached:
+                log.info("youtube cache %s", cached)
+                cmd = youtube.ffmpeg_file_cmd(str(cached))
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                self._radio_proc = proc
+                await self._pump_pcm(proc)
+                return
+            ytdlp_cmd, ff_cmd = youtube.youtube_pcm_cmds(source)
+        except Exception as exc:
+            log.warning("youtube cmd: %s", exc)
+            await self.status("error", "youtube: %s" % exc)
+            return
+        log.info("youtube yt-dlp %s", source)
+        ytdlp = await asyncio.create_subprocess_exec(
+            *ytdlp_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        self._ytdlp_proc = ytdlp
+        proc = await asyncio.create_subprocess_exec(
+            *ff_cmd,
+            stdin=ytdlp.stdout,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        if ytdlp.stdout:
+            ytdlp.stdout.close()
+        self._radio_proc = proc
+        await self._pump_pcm(proc)
 
     async def _finish_turn(self, pcm: bytes):
         if not self.api_key:
@@ -412,6 +462,9 @@ class GroqBackend(VoiceBackend):
         reply, cmds = self._chat(user_text)
         if not cmds:
             cmds = heuristic_commands(user_text, self._vol, self._bl)
+        cmds, music_err = attach_music_play(cmds, user_text, self._pick_music)
+        if music_err:
+            return reply, cmds, music_err
         cmds, radio_err = attach_radio_play(cmds, user_text, self._pick_radio)
         return reply, cmds, radio_err
 
@@ -446,6 +499,18 @@ class GroqBackend(VoiceBackend):
                         tool_body = {"ok": False, "ask": picked["clarify"]}
                     else:
                         tool_body = {"ok": False, "error": "no station"}
+                if name == "play_music":
+                    picked = self._pick_music((args.get("query") or user_text or "").strip())
+                    if picked and (picked.get("url") or picked.get("video_id")):
+                        extra = [youtube.device_music_cmd(picked)]
+                        cmds.extend(extra)
+                        tool_body = {
+                            "ok": True,
+                            "title": extra[0]["title"],
+                            "id": picked.get("video_id"),
+                        }
+                    else:
+                        tool_body = {"ok": False, "error": "no track"}
                 messages.append(
                     {
                         "role": "tool",
@@ -465,6 +530,16 @@ class GroqBackend(VoiceBackend):
         self._history.append({"role": "user", "content": user_text})
         self._history.append({"role": "assistant", "content": reply or spoken_ack(cmds)})
         return reply, cmds
+
+    def _pick_music(self, query: str):
+        try:
+            picked = youtube.resolve_track(query, self.youtube_cfg)
+            if picked:
+                log.info("youtube pick %s %s", picked.get("video_id"), picked.get("title"))
+            return picked
+        except Exception as exc:
+            log.warning("youtube resolve failed: %s", exc)
+            return None
 
     def _pick_radio(self, query: str):
         def picker(q, cands):
