@@ -72,15 +72,17 @@ TOOLS = [
         "function": {
             "name": "play_radio",
             "description": (
-                "Play an internet radio station by spoken name or style, "
-                "for example Европа Плюс or jazz radio. Search happens on the server."
+                "Play internet radio by station name or genre "
+                "(рок, металл, джаз, Европа Плюс). "
+                "The server finds a close match or asks to clarify. "
+                "Do not invent station names or stream URLs."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Station name or genre as the user said it.",
+                        "description": "Station name or genre as spoken, not a URL.",
                     }
                 },
                 "required": ["query"],
@@ -162,8 +164,11 @@ _RADIO_STOP = re.compile(
     r"выключи\s+радио|стоп\s+радио|останови\s+радио|выруби\s+радио"
 )
 _RADIO_PLAY = re.compile(
-    r"(?:включ(?:и|ить|ай)|поставь|играй|запусти)\s+радио(?:\s+(.+))?",
+    r"(?:включ(?:и|ить|ай)|поставь|играй|запусти)\s+(?:радио\s*)?(.*)$",
     re.IGNORECASE | re.DOTALL,
+)
+_NOT_STATION = re.compile(
+    r"^(экран|колонк|звук|микрофон|себя|свет|яркост|громкост)"
 )
 
 
@@ -177,7 +182,10 @@ def radio_play_query(text: str) -> str | None:
     m = _RADIO_PLAY.search(low)
     if not m:
         return None
-    return (m.group(1) or "").strip(" \t.!?,…")
+    query = (m.group(1) or "").strip(" \t.!?,…«»\"'")
+    if _NOT_STATION.search(query):
+        return None
+    return query
 
 
 def attach_radio_play(cmds: list[dict], user_text: str, pick_fn) -> tuple[list[dict], str | None]:
@@ -188,8 +196,10 @@ def attach_radio_play(cmds: list[dict], user_text: str, pick_fn) -> tuple[list[d
     if query is None:
         return cmds, None
     picked = pick_fn(query or user_text)
+    if picked and picked.get("clarify"):
+        return cmds, picked["clarify"]
     if not picked or not picked.get("url"):
-        return cmds, "Не нашла станцию."
+        return cmds, "Не нашла станцию. Назовите название или жанр."
     cmds.append(radio.device_play_cmd(picked))
     return cmds, None
 

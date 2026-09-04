@@ -343,6 +343,76 @@ class RadioProbeTest(unittest.TestCase):
         self.assertTrue(url.startswith("https://nl1.api.radio-browser.info/json/stations/search?"))
         self.assertIn("codec=MP3", url)
         self.assertIn("hidebroken=true", url)
+        self.assertIn("name=europa", url)
+
+    def test_search_plans_genre_uses_tag_and_world(self):
+        cfg = radio.normalize_config({})
+        plans = radio.search_plans("металл", cfg)
+        tags = [p.get("tag") for p in plans if p.get("tag")]
+        self.assertIn("metal", tags)
+        self.assertTrue(any(p.get("tag") == "metal" and not p.get("countrycode") for p in plans))
+
+    def test_search_plans_alias_and_local_name(self):
+        cfg = radio.normalize_config({})
+        plans = radio.search_plans("рок-фм", cfg)
+        names = [p.get("name") for p in plans if p.get("name")]
+        self.assertTrue(any("rock fm" in (n or "").lower() for n in names))
+        self.assertTrue(any(p.get("name") and p.get("countrycode") == "RU" for p in plans))
+
+    def test_search_url_for_tag_plan(self):
+        cfg = radio.normalize_config({})
+        url = radio.search_url(cfg, "металл", plan={"tag": "metal"})
+        self.assertIn("tag=metal", url)
+        self.assertNotIn("name=", url)
+
+    def test_search_stations_falls_back_to_tag(self):
+        cfg = radio.normalize_config({})
+        metal = {
+            "stationuuid": "metal-1",
+            "name": "Metal Pulse",
+            "url_resolved": "http://example.com/metal.mp3",
+            "codec": "MP3",
+            "bitrate": 192,
+            "hls": 0,
+            "tags": "metal,rock",
+            "countrycode": "US",
+        }
+
+        def fetch(url):
+            if "tag=metal" in url:
+                return [metal]
+            return []
+
+        raw = radio.search_stations("металл", cfg, fetch_fn=fetch)
+        self.assertEqual(raw[0]["stationuuid"], "metal-1")
+
+    def test_parse_picker_clarify_when_no_uuid(self):
+        cands = radio.filter_stations(SAMPLE, radio.normalize_config({}))
+        got = radio.parse_picker_reply(
+            '{"uuid":null,"title":"","ask":"Включить Rock FM или Наше Радио?"}',
+            cands,
+        )
+        self.assertEqual(got["clarify"], "Включить Rock FM или Наше Радио?")
+
+    def test_resolve_returns_clarify(self):
+        cfg = radio.normalize_config({})
+        picked = radio.resolve_station(
+            "рок",
+            cfg,
+            search_fn=lambda q, c: SAMPLE,
+            picker_fn=lambda q, c: json.dumps(
+                {"uuid": None, "ask": "Рок FM или Европа Плюс?"}
+            ),
+            probe_fn=lambda u: True,
+        )
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked["clarify"], "Рок FM или Европа Плюс?")
+        self.assertFalse(picked.get("url"))
+
+    def test_picker_prompt_allows_similar_or_ask(self):
+        text = radio.PICKER_PROMPT % ("металл", "[]")
+        self.assertIn("похож", text.lower())
+        self.assertIn("ask", text.lower())
 
 
 class RadioHeuristicTest(unittest.TestCase):
@@ -358,6 +428,8 @@ class RadioHeuristicTest(unittest.TestCase):
         self.assertEqual(radio_play_query("Включи радио европа плюс"), "европа плюс")
         self.assertEqual(radio_play_query("включай радио европа плюс"), "европа плюс")
         self.assertEqual(radio_play_query("поставь радио джаз"), "джаз")
+        self.assertEqual(radio_play_query("включи радиорок"), "рок")
+        self.assertEqual(radio_play_query("включи маяк"), "маяк")
         self.assertEqual(radio_play_query("включи радио"), "")
         self.assertIsNone(radio_play_query("выключи радио"))
         self.assertIsNone(radio_play_query("включи экран"))
@@ -395,6 +467,17 @@ class RadioHeuristicTest(unittest.TestCase):
         cmds, err = attach_radio_play([], "включи радио ноунейм", lambda q: None)
         self.assertEqual(cmds, [])
         self.assertIn("станц", err.lower())
+
+    def test_attach_radio_play_clarify(self):
+        from s3_kolonka_gw.device_ctrl import attach_radio_play
+
+        cmds, err = attach_radio_play(
+            [],
+            "включи радио рок",
+            lambda q: {"clarify": "Rock FM или Наше Радио?"},
+        )
+        self.assertEqual(cmds, [])
+        self.assertIn("Rock FM", err)
 
 
 if __name__ == "__main__":

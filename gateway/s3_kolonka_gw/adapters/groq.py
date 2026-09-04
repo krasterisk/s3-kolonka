@@ -42,9 +42,11 @@ _SYSTEM = (
     "без списков и разметки. Одно-три предложения. "
     "Если просят громкость, яркость, выключить или включить колонку — "
     "вызови соответствующую функцию. "
-    "Если просят включить радио или станцию — вызови play_radio с тем, "
-    "как сказал пользователь. Выключить радио — stop_radio. "
-    "Не выдумывай URL потока."
+    "Если просят включить радио, станцию или жанр — вызови play_radio "
+    "с тем, как сказал пользователь. Выключить радио — stop_radio. "
+    "Не выдумывай названия станций и URL. "
+    "Если инструмент вернул ask — озвучь этот вопрос. "
+    "Если станции нет — попроси уточнить название или жанр."
 )
 
 
@@ -430,10 +432,12 @@ class GroqBackend(VoiceBackend):
                 tool_body = extra or {"ok": True}
                 if name == "play_radio":
                     picked = self._pick_radio((args.get("query") or user_text or "").strip())
-                    if picked:
+                    if picked and picked.get("url"):
                         extra = [radio.device_play_cmd(picked)]
                         cmds.extend(extra)
-                        tool_body = {"ok": True, "title": extra[0]["title"], "uuid": picked["uuid"]}
+                        tool_body = {"ok": True, "title": extra[0]["title"], "uuid": picked.get("uuid")}
+                    elif picked and picked.get("clarify"):
+                        tool_body = {"ok": False, "ask": picked["clarify"]}
                     else:
                         tool_body = {"ok": False, "error": "no station"}
                 messages.append(
@@ -464,6 +468,7 @@ class GroqBackend(VoiceBackend):
                     "name": c["name"],
                     "bitrate": c["bitrate"],
                     "countrycode": c.get("countrycode") or "",
+                    "tags": c.get("tags") or "",
                 }
                 for c in cands
             ]
