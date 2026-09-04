@@ -20,6 +20,7 @@
 #define RADIO_HAS_CVT 1
 #endif
 #include "aec.h"
+#include "afe_aec.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -192,7 +193,60 @@ void app_audio_flush_preroll(void)
 {
 }
 
-static void mic_task(void *arg)
+static void handle_mono(const int16_t *mono, int frames)
+{
+    if (!mono || frames <= 0) {
+        return;
+    }
+    int64_t acc = 0;
+    for (int i = 0; i < frames; i++) {
+        acc += (int32_t)mono[i] * (int32_t)mono[i];
+    }
+    int level = (int)(sqrtf((float)acc / (float)frames) / (float)MIC_UI_DIV);
+    if (level < MIC_UI_GATE) {
+        level = 0;
+    } else {
+        level -= MIC_UI_GATE;
+    }
+    if (level > 100) {
+        level = 100;
+    }
+    s_mic_level = (s_mic_level * 2 + level) / 3;
+
+    if (s_listen && !s_radio) {
+        s_listen_samples += frames;
+        if (s_listen_samples > SAMPLE_RATE * 4 / 10) {
+            if (level >= 12) {
+                s_speech_seen = true;
+                s_silence_samples = 0;
+            } else if (s_speech_seen) {
+                s_silence_samples += frames;
+                if (s_silence_samples >= SAMPLE_RATE * 12 / 10) {
+                    s_listen = false;
+                    s_mic_level = 0;
+                }
+            }
+        }
+        if (s_listen_samples >= SAMPLE_RATE * 12) {
+            s_listen = false;
+            s_mic_level = 0;
+        }
+    }
+
+    if (s_mic_sink && s_listen && !s_radio) {
+        s_mic_sink(mono, frames);
+    }
+
+    if (s_mww && !s_listen && s_standby) {
+        if (mww_feed(mono, frames)) {
+            if (s_wake_cb) {
+                s_wake_cb();
+            }
+        }
+    }
+}
+
+static void raw_mic_task(void *arg)
 {
     (void)arg;
     const int frames = 160;
@@ -218,60 +272,66 @@ static void mic_task(void *arg)
             continue;
         }
 
-        /* RMNM: ch0 is DAC loopback, ch1 is the mic. Cancel echo only while
-         * the speaker is up so standby wake sees clean mic samples. */
-        bool cancel = s_playing || s_radio;
         int16_t mono[160];
-        int64_t acc = 0;
+        bool cancel = s_playing || s_radio;
         for (int i = 0; i < frames; i++) {
             const int16_t *slot = &buf[MIC_CHANNELS * i];
-            int16_t clean = cancel ? aec_process(slot[MIC_L_CH], slot[MIC_REF_CH])
-                                   : slot[MIC_L_CH];
-            mono[i] = clean;
-            acc += (int32_t)clean * (int32_t)clean;
+            mono[i] = cancel ? aec_process(slot[MIC_L_CH], slot[MIC_REF_CH]) : slot[MIC_L_CH];
         }
-        int level = (int)(sqrtf((float)acc / (float)frames) / (float)MIC_UI_DIV);
-        if (level < MIC_UI_GATE) {
-            level = 0;
-        } else {
-            level -= MIC_UI_GATE;
-        }
-        if (level > 100) {
-            level = 100;
-        }
-        s_mic_level = (s_mic_level * 2 + level) / 3;
+        handle_mono(mono, frames);
+    }
+}
 
-        if (s_listen && !s_radio) {
-            s_listen_samples += frames;
-            if (s_listen_samples > SAMPLE_RATE * 4 / 10) {
-                if (level >= 12) {
-                    s_speech_seen = true;
-                    s_silence_samples = 0;
-                } else if (s_speech_seen) {
-                    s_silence_samples += frames;
-                    if (s_silence_samples >= SAMPLE_RATE * 12 / 10) {
-                        s_listen = false;
-                        s_mic_level = 0;
-                    }
-                }
-            }
-            if (s_listen_samples >= SAMPLE_RATE * 12) {
-                s_listen = false;
-                s_mic_level = 0;
-            }
-        }
+static void afe_feed_task(void *arg)
+{
+    (void)arg;
+    int samples = afe_aec_feed_samples();
+    int ch = afe_aec_feed_ch();
+    if (samples <= 0 || ch <= 0) {
+        ESP_LOGE(TAG, "afe feed size bad");
+        vTaskDelete(NULL);
+        return;
+    }
+    int bytes = samples * ch * (int)sizeof(int16_t);
+    int16_t *buf = heap_caps_malloc((size_t)bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        buf = malloc((size_t)bytes);
+    }
+    if (!buf) {
+        ESP_LOGE(TAG, "afe feed alloc failed");
+        vTaskDelete(NULL);
+        return;
+    }
 
-        if (s_mic_sink && s_listen && !s_radio) {
-            s_mic_sink(mono, frames);
+    while (1) {
+        if (esp_get_feed_data(true, buf, bytes) != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
         }
+        afe_aec_feed(buf);
+    }
+}
 
-        if (s_mww && !s_listen && s_standby) {
-            if (mww_feed(mono, frames)) {
-                if (s_wake_cb) {
-                    s_wake_cb();
-                }
-            }
+static void afe_fetch_task(void *arg)
+{
+    (void)arg;
+    int16_t *mono = heap_caps_malloc(1024 * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!mono) {
+        mono = malloc(1024 * sizeof(int16_t));
+    }
+    if (!mono) {
+        ESP_LOGE(TAG, "afe fetch alloc failed");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    while (1) {
+        int n = afe_aec_fetch(mono, 1024);
+        if (n <= 0) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
         }
+        handle_mono(mono, n);
     }
 }
 
@@ -543,10 +603,15 @@ void app_audio_start(void)
     if (!s_mww) {
         ESP_LOGW(TAG, "mww off, tap listen only");
     }
-    /* Core 0: mic + wake. Core 1: play. Same-core play at prio 5 starved MWW
-     * during radio, so Hey Jarvis died and stayed dead after stop. */
-    /* Core 0 with Wi‑Fi: keep prio below the radio play task on core 1, but
-     * not so high that TFLite starves the station. */
-    xTaskCreatePinnedToCore(mic_task, "mic", 8192, NULL, 4, NULL, 0);
-    ESP_LOGI(TAG, "audio ready, volume=%d wake=%s", s_volume, s_mww ? "hey-jarvis" : "no");
+    if (afe_aec_start()) {
+        /* Waveshare V2 demo: feed on core 0, detect on core 1. Play is prio 5. */
+        xTaskCreatePinnedToCore(afe_feed_task, "afe_feed", 8192, NULL, 4, NULL, 0);
+        xTaskCreatePinnedToCore(afe_fetch_task, "afe_fetch", 8192, NULL, 4, NULL, 1);
+        ESP_LOGI(TAG, "audio ready afe-aec volume=%d wake=%s", s_volume,
+                 s_mww ? "hey-jarvis" : "no");
+    } else {
+        xTaskCreatePinnedToCore(raw_mic_task, "mic", 8192, NULL, 4, NULL, 0);
+        ESP_LOGW(TAG, "audio ready raw-mic volume=%d wake=%s", s_volume,
+                 s_mww ? "hey-jarvis" : "no");
+    }
 }

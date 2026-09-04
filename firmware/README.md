@@ -30,3 +30,6 @@ idf.py -p <PORT> flash monitor
 - LVGL demo sources under `main/LVGL_UI/` are linked for the vendor drivers;
   the UI is `main/ui/` (Home / Media / Settings)
 - SoftAP SSID is `s3-kolonka`. Wi-Fi is 2.4 GHz only
+- Wake is on-device Hey Jarvis (microWakeWord). Echo cancellation is ESP-SR
+  AFE AEC only — WakeNet stays off. If AFE fails to start, the one-tap
+  canceller in `app/aec.c` is used instead
