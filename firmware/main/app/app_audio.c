@@ -266,6 +266,7 @@ static void mic_task(void *arg)
         }
 
         if (s_mww && !s_listen && s_standby) {
+            mww_set_noisy(s_radio || s_playing);
             if (mww_feed(mono, frames)) {
                 if (s_wake_cb) {
                     s_wake_cb();

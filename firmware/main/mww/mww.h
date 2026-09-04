@@ -9,6 +9,7 @@ extern "C" {
 
 bool mww_start(void);
 void mww_reset(void);
+void mww_set_noisy(bool on);
 bool mww_feed(const int16_t *mono, int samples);
 
 #ifdef __cplusplus
