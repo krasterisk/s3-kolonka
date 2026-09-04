@@ -29,7 +29,11 @@ void app_main(void)
     ui_show_home();
 
     app_wifi_start();
-    app_brain_start();
+    if (!app_wifi_is_setup_ap()) {
+        app_brain_start();
+    } else {
+        ESP_LOGI(TAG, "setup AP: skip brain until Wi-Fi is saved");
+    }
     app_audio_start();
     ESP_LOGI(TAG, "s3-kolonka ready");
 

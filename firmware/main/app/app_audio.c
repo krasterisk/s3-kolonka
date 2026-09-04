@@ -22,6 +22,7 @@
 #include "aec.h"
 #include "afe_aec.h"
 #include "app_brain.h"
+#include "app_wifi.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -625,6 +626,10 @@ void app_audio_start(void)
 
     app_audio_set_volume(s_volume);
     app_audio_chime();
+    if (app_wifi_is_setup_ap()) {
+        ESP_LOGI(TAG, "setup AP: skip mww/afe so the portal has RAM");
+        return;
+    }
     esp_asp_cfg_t radio_cfg = {
         .in.cb = NULL,
         .in.user_ctx = NULL,
