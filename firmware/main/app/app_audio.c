@@ -10,7 +10,15 @@
 
 #include "driver/gpio.h"
 #include "esp_audio_simple_player.h"
+#include "esp_audio_simple_player_advance.h"
 #include "esp_board_init.h"
+#if __has_include("esp_gmf_rate_cvt.h")
+#include "esp_gmf_bit_cvt.h"
+#include "esp_gmf_ch_cvt.h"
+#include "esp_gmf_pipeline.h"
+#include "esp_gmf_rate_cvt.h"
+#define RADIO_HAS_CVT 1
+#endif
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -243,7 +251,7 @@ static void mic_task(void *arg)
             s_mic_sink(mono, frames);
         }
 
-        if (s_mww && !s_listen && s_standby && !s_playing) {
+        if (s_mww && !s_listen && s_standby && (!s_playing || s_radio)) {
             if (mww_feed(mono, frames)) {
                 if (s_wake_cb) {
                     s_wake_cb();
@@ -326,16 +334,61 @@ static int radio_out_cb(uint8_t *data, int data_size, void *ctx)
     if (!s_radio || !data || data_size <= 0) {
         return 0;
     }
-    if (s_i2s) {
-        xSemaphoreTake(s_i2s, portMAX_DELAY);
-    }
     pa_on();
-    esp_audio_play((int16_t *)data, data_size, portMAX_DELAY);
-    if (s_i2s) {
-        xSemaphoreGive(s_i2s);
+    /* Match the Waveshare demo: short timeout, no I2S mutex. A long block
+     * starves the mic/wake task on the same core. */
+    if (esp_audio_play((int16_t *)data, data_size, pdMS_TO_TICKS(80)) != ESP_OK) {
+        ESP_LOGW(TAG, "radio out drop %d", data_size);
     }
     return 0;
 }
+
+static int radio_event_cb(esp_asp_event_pkt_t *event, void *ctx)
+{
+    (void)ctx;
+    if (!event) {
+        return 0;
+    }
+    if (event->type == ESP_ASP_EVENT_TYPE_MUSIC_INFO && event->payload) {
+        esp_asp_music_info_t info = {0};
+        memcpy(&info, event->payload, event->payload_size);
+        ESP_LOGI(TAG, "radio info rate=%d ch=%u bits=%u", info.sample_rate,
+                 (unsigned)info.channels, (unsigned)info.bits);
+    } else if (event->type == ESP_ASP_EVENT_TYPE_STATE && event->payload) {
+        esp_asp_state_t st = ESP_ASP_STATE_NONE;
+        memcpy(&st, event->payload, event->payload_size);
+        ESP_LOGI(TAG, "radio state %s", esp_audio_simple_player_state_to_str(st));
+        if (st == ESP_ASP_STATE_ERROR || st == ESP_ASP_STATE_FINISHED) {
+            s_radio = false;
+            if (!s_playing) {
+                pa_off();
+            }
+        }
+    }
+    return 0;
+}
+
+#if RADIO_HAS_CVT
+static int radio_prev(esp_asp_handle_t handle, void *ctx)
+{
+    (void)ctx;
+    esp_gmf_pipeline_handle_t pipe = NULL;
+    if (esp_audio_simple_player_get_pipeline(handle, &pipe) != ESP_OK || !pipe) {
+        return 0;
+    }
+    esp_gmf_element_handle_t el = NULL;
+    if (esp_gmf_pipeline_get_el_by_name(pipe, "aud_rate_cvt", &el) == ESP_OK && el) {
+        esp_gmf_rate_cvt_set_dest_rate(el, SAMPLE_RATE);
+    }
+    if (esp_gmf_pipeline_get_el_by_name(pipe, "aud_ch_cvt", &el) == ESP_OK && el) {
+        esp_gmf_ch_cvt_set_dest_channel(el, 2);
+    }
+    if (esp_gmf_pipeline_get_el_by_name(pipe, "aud_bit_cvt", &el) == ESP_OK && el) {
+        esp_gmf_bit_cvt_set_dest_bits(el, 16);
+    }
+    return 0;
+}
+#endif
 
 static bool radio_url_ok(const char *url)
 {
@@ -349,6 +402,37 @@ static bool radio_url_ok(const char *url)
         return false;
     }
     return true;
+}
+
+static void radio_uri_for_player(const char *url, char *out, size_t out_sz)
+{
+    if (!out || out_sz < 16) {
+        return;
+    }
+    strncpy(out, url ? url : "", out_sz - 1);
+    out[out_sz - 1] = 0;
+    char *hash = strchr(out, '#');
+    if (hash) {
+        *hash = 0;
+    }
+    char *query = strchr(out, '?');
+    const char *path_end = query ? query : out + strlen(out);
+    const char *dot = NULL;
+    for (const char *p = out; p < path_end; p++) {
+        if (*p == '.') {
+            dot = p;
+        }
+        if (*p == '/') {
+            dot = NULL;
+        }
+    }
+    bool has_ext = false;
+    if (dot && path_end - dot <= 5) {
+        has_ext = true;
+    }
+    if (!has_ext && strlen(out) + 11 < out_sz) {
+        strcat(out, "#stream.mp3");
+    }
 }
 
 void app_audio_radio_stop(void)
@@ -371,21 +455,23 @@ void app_audio_radio_stop(void)
 
 bool app_audio_radio_start(const char *url)
 {
+    char uri[288];
     if (!radio_url_ok(url) || !s_radio_player) {
         ESP_LOGW(TAG, "radio reject url");
         return false;
     }
+    radio_uri_for_player(url, uri, sizeof(uri));
     app_audio_play_abort();
     app_audio_radio_stop();
     s_radio = true;
     pa_on();
-    if (esp_audio_simple_player_run(s_radio_player, url, NULL) != ESP_OK) {
-        ESP_LOGW(TAG, "radio run fail");
+    if (esp_audio_simple_player_run(s_radio_player, uri, NULL) != ESP_OK) {
+        ESP_LOGW(TAG, "radio run fail %s", uri);
         s_radio = false;
         pa_off();
         return false;
     }
-    ESP_LOGI(TAG, "radio start");
+    ESP_LOGI(TAG, "radio start %s", uri);
     return true;
 }
 
@@ -408,10 +494,19 @@ void app_audio_start(void)
         .in.user_ctx = NULL,
         .out.cb = radio_out_cb,
         .out.user_ctx = NULL,
+        .task_prio = 3,
+        .task_stack = 8192,
+        .task_core = 1,
+        .task_stack_in_ext = true,
+#if RADIO_HAS_CVT
+        .prev = radio_prev,
+#endif
     };
     if (esp_audio_simple_player_new(&radio_cfg, &s_radio_player) != ESP_OK) {
         s_radio_player = NULL;
         ESP_LOGW(TAG, "radio player init failed");
+    } else {
+        esp_audio_simple_player_set_event(s_radio_player, radio_event_cb, NULL);
     }
     s_mww = mww_start();
     if (!s_mww) {

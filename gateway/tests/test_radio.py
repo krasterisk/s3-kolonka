@@ -58,6 +58,21 @@ SAMPLE = [
 ]
 
 
+class RadioUriTest(unittest.TestCase):
+    def test_adds_mp3_hint_when_path_has_no_extension(self):
+        from s3_kolonka_gw.radio import player_uri
+
+        self.assertEqual(
+            player_uri("http://ep128server.streamr.ru:8030/ep128"),
+            "http://ep128server.streamr.ru:8030/ep128#stream.mp3",
+        )
+        self.assertEqual(
+            player_uri("http://emgregion.hostingradio.ru:8064/moscow.europaplus.mp3"),
+            "http://emgregion.hostingradio.ru:8064/moscow.europaplus.mp3",
+        )
+        self.assertTrue(player_uri("https://host/stream?token=1").endswith("#stream.mp3"))
+
+
 class RadioFilterTest(unittest.TestCase):
     def test_keeps_mp3_icecast_and_unknown_bitrate(self):
         cfg = radio.normalize_config({})

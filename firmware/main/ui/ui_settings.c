@@ -10,16 +10,35 @@ static lv_obj_t *s_bl;
 static lv_obj_t *s_wifi;
 static lv_obj_t *s_brain;
 
+static void on_slider(lv_event_t *e, bool volume)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_PRESSED) {
+        ui_swipe_lock(true);
+        return;
+    }
+    if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        ui_swipe_lock(false);
+    }
+    if (code != LV_EVENT_VALUE_CHANGED) {
+        return;
+    }
+    int v = lv_slider_get_value(lv_event_get_target(e));
+    if (volume) {
+        app_audio_set_volume(v);
+    } else {
+        ui_handle_brightness(v);
+    }
+}
+
 static void on_vol(lv_event_t *e)
 {
-    int v = lv_slider_get_value(lv_event_get_target(e));
-    app_audio_set_volume(v);
+    on_slider(e, true);
 }
 
 static void on_bl(lv_event_t *e)
 {
-    int v = lv_slider_get_value(lv_event_get_target(e));
-    ui_handle_brightness(v);
+    on_slider(e, false);
 }
 
 static void on_forget(lv_event_t *e)
@@ -67,7 +86,7 @@ void ui_settings_create(lv_obj_t *parent)
     lv_obj_align(s_vol, LV_ALIGN_CENTER, 0, 14);
     lv_obj_clear_flag(s_vol, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_clear_flag(s_vol, LV_OBJ_FLAG_SCROLL_CHAIN);
-    lv_obj_add_event_cb(s_vol, on_vol, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(s_vol, on_vol, LV_EVENT_ALL, NULL);
 
     lv_obj_t *bl_l = lv_label_create(parent);
     lv_label_set_text(bl_l, "Яркость");
@@ -82,7 +101,7 @@ void ui_settings_create(lv_obj_t *parent)
     lv_obj_align(s_bl, LV_ALIGN_CENTER, 0, 72);
     lv_obj_clear_flag(s_bl, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_clear_flag(s_bl, LV_OBJ_FLAG_SCROLL_CHAIN);
-    lv_obj_add_event_cb(s_bl, on_bl, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(s_bl, on_bl, LV_EVENT_ALL, NULL);
 
     lv_obj_t *forget = lv_btn_create(parent);
     lv_obj_set_size(forget, UI_RESET_WIFI_W, UI_RESET_WIFI_H);

@@ -11,6 +11,7 @@ typedef enum {
 } ui_page_t;
 
 void ui_go_page(ui_page_t page);
+void ui_swipe_lock(bool lock);
 void ui_handle_listen_click(void);
 void ui_handle_wake(void);
 void ui_handle_radio_stop(void);

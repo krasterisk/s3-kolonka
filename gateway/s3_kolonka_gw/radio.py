@@ -57,6 +57,23 @@ def search_url(cfg, query):
     return cfg["base_url"] + "/json/stations/search?" + urllib.parse.urlencode(params)
 
 
+_AUDIO_EXT = (".mp3", ".aac", ".wav", ".flac", ".m4a", ".amr", ".opus")
+
+
+def player_uri(url):
+    raw = (url or "").strip()
+    if not raw:
+        return raw
+    no_frag = raw.split("#", 1)[0]
+    path = urllib.parse.urlparse(no_frag).path or ""
+    lower = path.lower()
+    if any(lower.endswith(ext) for ext in _AUDIO_EXT):
+        return raw
+    if raw.endswith("#stream.mp3"):
+        return raw
+    return raw + "#stream.mp3"
+
+
 def click_url(cfg, uuid):
     cfg = normalize_config(cfg)
     return cfg["base_url"] + "/json/url/" + urllib.parse.quote(uuid)
@@ -164,4 +181,5 @@ def resolve_station(query, cfg, search_fn=None, picker_fn=None, opener=None):
     clicked = resolve_click(picked["uuid"], cfg, opener=opener) if search_fn is None else None
     if clicked:
         picked["url"] = clicked
+    picked["url"] = player_uri(picked.get("url") or "")
     return picked

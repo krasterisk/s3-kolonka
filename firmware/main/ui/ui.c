@@ -59,6 +59,18 @@ void ui_go_page(ui_page_t page)
     nav_set_active(page);
 }
 
+void ui_swipe_lock(bool lock)
+{
+    if (!s_tv) {
+        return;
+    }
+    if (lock) {
+        lv_obj_clear_flag(s_tv, LV_OBJ_FLAG_SCROLLABLE);
+    } else {
+        lv_obj_add_flag(s_tv, LV_OBJ_FLAG_SCROLLABLE);
+    }
+}
+
 static void on_nav(lv_event_t *e)
 {
     ui_page_t page = (ui_page_t)(intptr_t)lv_event_get_user_data(e);
@@ -121,7 +133,10 @@ static const char *friendly_status(void)
 
 void ui_handle_wake(void)
 {
-    if (app_audio_is_listening() || app_audio_is_playing() || !app_brain_ready()) {
+    if (app_audio_is_listening() || !app_brain_ready()) {
+        return;
+    }
+    if (app_audio_is_playing() && !app_audio_is_radio()) {
         return;
     }
     if (app_audio_is_radio()) {

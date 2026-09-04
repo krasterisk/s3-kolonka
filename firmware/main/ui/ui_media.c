@@ -18,8 +18,17 @@ static void on_stop(lv_event_t *e)
 
 static void on_vol(lv_event_t *e)
 {
-    int v = lv_slider_get_value(lv_event_get_target(e));
-    app_audio_set_volume(v);
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_PRESSED) {
+        ui_swipe_lock(true);
+        return;
+    }
+    if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        ui_swipe_lock(false);
+    }
+    if (code == LV_EVENT_VALUE_CHANGED) {
+        app_audio_set_volume(lv_slider_get_value(lv_event_get_target(e)));
+    }
 }
 
 void ui_media_create(lv_obj_t *parent)
@@ -76,7 +85,7 @@ void ui_media_create(lv_obj_t *parent)
     lv_obj_align(s_vol, LV_ALIGN_BOTTOM_MID, 0, -52);
     lv_obj_clear_flag(s_vol, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_clear_flag(s_vol, LV_OBJ_FLAG_SCROLL_CHAIN);
-    lv_obj_add_event_cb(s_vol, on_vol, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(s_vol, on_vol, LV_EVENT_ALL, NULL);
 }
 
 void ui_media_set_playing(bool on, const char *title)
