@@ -7,11 +7,15 @@ from s3_kolonka_gw import radio
 
 
 class _FakeResp:
-    def __init__(self, body, ctype="audio/mpeg", extra=None):
+    def __init__(self, body, ctype="audio/mpeg", extra=None, final_url=None):
         self.body = body
         self.headers = {"Content-Type": ctype}
+        self.final_url = final_url
         if extra:
             self.headers.update(extra)
+
+    def geturl(self):
+        return self.final_url or ""
 
     def read(self, n=-1):
         return self.body if n < 0 else self.body[:n]
@@ -194,6 +198,57 @@ class RadioProbeTest(unittest.TestCase):
                 opener=_FakeOpener({"": _FakeResp(b"<!DOCTYPE html>", "text/html")}),
             )
         )
+
+    def test_probe_returns_redirect_target(self):
+        mpeg = bytes.fromhex("fffbe040") + b"\x00" * 16
+        cfg = radio.normalize_config({})
+        opener = _FakeOpener(
+            {
+                "213.59.4.27": _FakeResp(
+                    mpeg,
+                    "audio/mpeg",
+                    extra={"icy-br": "128"},
+                    final_url="http://silverrain.hostingradio.ru/silver128.mp3",
+                )
+            }
+        )
+        got = radio.probe_stream("http://213.59.4.27:8000/silver128.mp3", cfg, opener=opener)
+        self.assertEqual(got, "http://silverrain.hostingradio.ru/silver128.mp3")
+
+    def test_resolve_sends_url_after_redirect(self):
+        cfg = radio.normalize_config({})
+        mpeg = bytes.fromhex("fffbe040") + b"\x00" * 16
+        catalog = [
+            {
+                "stationuuid": "silver",
+                "name": "Серебряный дождь",
+                "url_resolved": "http://213.59.4.27:8000/silver128.mp3",
+                "codec": "MP3",
+                "bitrate": 128,
+                "hls": 0,
+                "lastcheckok": 1,
+                "countrycode": "RU",
+            }
+        ]
+        opener = _FakeOpener(
+            {
+                "213.59.4.27": _FakeResp(
+                    mpeg,
+                    "audio/mpeg",
+                    extra={"icy-br": "128"},
+                    final_url="http://silverrain.hostingradio.ru/silver128.mp3",
+                )
+            }
+        )
+        picked = radio.resolve_station(
+            "серебряный дождь",
+            cfg,
+            search_fn=lambda q, c: catalog,
+            picker_fn=lambda q, c: json.dumps({"uuid": "silver", "title": "Серебряный дождь"}),
+            opener=opener,
+        )
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked["url"], "http://silverrain.hostingradio.ru/silver128.mp3")
 
     def test_probe_accepts_icecast_headers_without_mpeg_sync(self):
         cfg = radio.normalize_config({})

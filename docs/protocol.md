@@ -41,7 +41,7 @@ ends the turn (silence / max length).
 
 `thinking`, `speaking`, `idle`, `radio`, and `error` end the listen UI on the device.
 
-`radio_play` must be HTTP(S) MP3 Icecast. HLS / m3u8 is rejected. Radio and TTS never share the DAC. The gateway probes each candidate before sending `radio_play`; a dead or non-MP3 URL is skipped and the next station is used. If none work, the device is not started and the user hears that no station was found.
+`radio_play` must be HTTP(S) MP3 Icecast. HLS / m3u8 is rejected. Radio and TTS never share the DAC. The gateway probes each candidate before sending `radio_play`; a dead or non-MP3 URL is skipped and the next station is used. HTTP redirects are followed and the final URL is sent, because a 301 with an empty body stops the on-device player. If none work, the device is not started and the user hears that no station was found.
 
 Wake words (when `mode=wake`): «колонка», «слушай», «kolonka», «проснись».
 A tap Listen still processes speech without a wake word.

@@ -179,10 +179,11 @@ def looks_like_mp3(body, content_type=""):
 
 
 def probe_stream(url, cfg, opener=None, timeout=8):
+    """Return the playable URL after redirects, or None if the stream is dead."""
     cfg = normalize_config(cfg)
     raw = (url or "").split("#", 1)[0].strip()
     if not raw:
-        return False
+        return None
     req = urllib.request.Request(
         raw,
         headers={
@@ -193,27 +194,30 @@ def probe_stream(url, cfg, opener=None, timeout=8):
         method="GET",
     )
     handle = opener or urllib.request.build_opener()
+    final = raw
     try:
         with handle.open(req, timeout=timeout) as resp:
             status = getattr(resp, "status", 200)
             if status >= 400:
                 log.warning("radio probe HTTP %s %s", status, raw)
-                return False
+                return None
             headers = getattr(resp, "headers", None)
             ctype = _header(headers, "Content-Type")
             body = resp.read(2048)
+            if hasattr(resp, "geturl"):
+                final = (resp.geturl() or raw).split("#", 1)[0].strip() or raw
     except urllib.error.HTTPError as exc:
         log.warning("radio probe HTTP %s %s", exc.code, raw)
-        return False
+        return None
     except Exception as exc:
         log.warning("radio probe fail %s: %s", raw, exc)
-        return False
-    if _icy_alive(headers):
-        return True
-    ok = looks_like_mp3(body, ctype)
-    if not ok:
-        log.warning("radio probe not mp3 %s ctype=%s", raw, ctype)
-    return ok
+        return None
+    if _icy_alive(headers) or looks_like_mp3(body, ctype):
+        if final != raw:
+            log.info("radio probe redirect %s -> %s", raw, final)
+        return final
+    log.warning("radio probe not mp3 %s ctype=%s", raw, ctype)
+    return None
 
 
 def _header(headers, name):
@@ -266,9 +270,12 @@ def resolve_station(query, cfg, search_fn=None, picker_fn=None, opener=None, pro
         url = player_uri(url)
         if not url:
             continue
-        if not probe(url):
+        probed = probe(url)
+        if not probed:
             log.warning("radio skip dead %s %s", cand.get("name"), url)
             continue
+        if probed is not True:
+            url = player_uri(str(probed))
         out = dict(cand)
         out["url"] = url
         if cand["uuid"] == picked["uuid"]:
