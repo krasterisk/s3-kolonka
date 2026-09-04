@@ -373,7 +373,8 @@ static void brain_task(void *arg)
                 .port = BRAIN_PORT,
                 .path = "/",
                 .transport = WEBSOCKET_TRANSPORT_OVER_TCP,
-                .buffer_size = 4096,
+                .buffer_size = 2048,
+                .task_stack = 4096,
                 .network_timeout_ms = 60000,
                 .reconnect_timeout_ms = 3000,
                 .disable_auto_reconnect = false,
@@ -390,10 +391,15 @@ static void brain_task(void *arg)
             esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, on_ws, NULL);
             esp_err_t err = esp_websocket_client_start(s_ws);
             if (err != ESP_OK) {
-                ESP_LOGE(TAG, "start fail %s heap=%u", esp_err_to_name(err),
-                         (unsigned)esp_get_free_heap_size());
+                size_t intern = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+                ESP_LOGE(TAG, "start fail %s heap=%u internal=%u", esp_err_to_name(err),
+                         (unsigned)esp_get_free_heap_size(), (unsigned)intern);
                 brain_destroy();
-                snprintf(s_status, sizeof(s_status), "Brain: st %s", esp_err_to_name(err));
+                if (intern < 24576) {
+                    set_status("Brain: no ram");
+                } else {
+                    snprintf(s_status, sizeof(s_status), "Brain: st %s", esp_err_to_name(err));
+                }
                 vTaskDelay(pdMS_TO_TICKS(2000));
             }
             continue;

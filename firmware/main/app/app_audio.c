@@ -21,11 +21,16 @@
 #endif
 #include "aec.h"
 #include "afe_aec.h"
+#include "app_brain.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#ifdef CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+#include "freertos/idf_additions.h"
+#endif
 #include "mww.h"
 
 #define PA_GPIO GPIO_NUM_15
@@ -335,6 +340,46 @@ static void afe_fetch_task(void *arg)
     }
 }
 
+static void start_mic_task(TaskFunction_t fn, const char *name, uint32_t stack, int core)
+{
+#ifdef CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    if (xTaskCreatePinnedToCoreWithCaps(fn, name, stack, NULL, 4, NULL, core,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS) {
+        return;
+    }
+    ESP_LOGW(TAG, "%s PSRAM stack failed, using internal", name);
+#endif
+    xTaskCreatePinnedToCore(fn, name, stack, NULL, 4, NULL, core);
+}
+
+static void mic_boot_task(void *arg)
+{
+    (void)arg;
+    for (int i = 0; i < 150; i++) {
+        if (app_brain_ready()) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    size_t intern = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGI(TAG, "mic boot heap=%u internal=%u brain=%d",
+             (unsigned)esp_get_free_heap_size(), (unsigned)intern,
+             app_brain_ready() ? 1 : 0);
+
+    if (intern > 40000 && afe_aec_start()) {
+        start_mic_task(afe_feed_task, "afe_feed", 8192, 0);
+        start_mic_task(afe_fetch_task, "afe_fetch", 8192, 1);
+        ESP_LOGI(TAG, "audio ready afe-aec volume=%d wake=%s", s_volume,
+                 s_mww ? "hey-jarvis" : "no");
+    } else {
+        start_mic_task(raw_mic_task, "mic", 8192, 0);
+        ESP_LOGW(TAG, "audio ready raw-mic volume=%d wake=%s internal=%u", s_volume,
+                 s_mww ? "hey-jarvis" : "no", (unsigned)intern);
+    }
+    vTaskDelete(NULL);
+}
+
 void app_audio_set_mic_sink(app_audio_mic_sink_t sink)
 {
     s_mic_sink = sink;
@@ -603,15 +648,7 @@ void app_audio_start(void)
     if (!s_mww) {
         ESP_LOGW(TAG, "mww off, tap listen only");
     }
-    if (afe_aec_start()) {
-        /* Waveshare V2 demo: feed on core 0, detect on core 1. Play is prio 5. */
-        xTaskCreatePinnedToCore(afe_feed_task, "afe_feed", 8192, NULL, 4, NULL, 0);
-        xTaskCreatePinnedToCore(afe_fetch_task, "afe_fetch", 8192, NULL, 4, NULL, 1);
-        ESP_LOGI(TAG, "audio ready afe-aec volume=%d wake=%s", s_volume,
-                 s_mww ? "hey-jarvis" : "no");
-    } else {
-        xTaskCreatePinnedToCore(raw_mic_task, "mic", 8192, NULL, 4, NULL, 0);
-        ESP_LOGW(TAG, "audio ready raw-mic volume=%d wake=%s", s_volume,
-                 s_mww ? "hey-jarvis" : "no");
-    }
+    /* AFE after the brain socket: AEC used to starve internal RAM so
+     * esp_websocket_client_start() returned ESP_FAIL. */
+    xTaskCreatePinnedToCore(mic_boot_task, "mic_boot", 4096, NULL, 3, NULL, 0);
 }

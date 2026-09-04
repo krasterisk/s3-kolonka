@@ -50,6 +50,7 @@ bool afe_aec_start(void)
     cfg->vad_init = false;
     cfg->se_init = false;
     cfg->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
+    cfg->afe_ringbuf_size = 16;
     /* Keep AFE work off core 0 so Wi-Fi / LWIP stay responsive. */
     cfg->afe_perferred_core = 1;
     cfg->afe_perferred_priority = 4;

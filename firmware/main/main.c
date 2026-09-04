@@ -28,9 +28,9 @@ void app_main(void)
     LVGL_Init();
     ui_show_home();
 
-    app_audio_start();
     app_wifi_start();
     app_brain_start();
+    app_audio_start();
     ESP_LOGI(TAG, "s3-kolonka ready");
 
     uint32_t tick = 0;
