@@ -31,10 +31,14 @@ def normalize_config(cfg=None):
 
 
 def _which(name, configured=""):
+    import sys
     from shutil import which
 
     if configured:
         return configured
+    sibling = Path(sys.executable).parent / name
+    if sibling.is_file():
+        return str(sibling)
     return which(name) or name
 
 
@@ -203,13 +207,14 @@ def device_music_cmd(picked):
     )
 
 
-def youtube_pcm_cmds(source, ytdlp=None, ffmpeg=None, sample_rate=16000):
+def ytdlp_download_cmd(source, dest, ytdlp=None):
     watch = watch_url(video_id_from_source(source)) if video_id_from_source(source) else (source or "")
     if not watch:
         raise ValueError("bad youtube source")
+    if not dest:
+        raise ValueError("bad youtube dest")
     ytdlp = ytdlp or _which("yt-dlp")
-    ffmpeg = ffmpeg or _which("ffmpeg")
-    ytdlp_cmd = [
+    return [
         ytdlp,
         "-f",
         "ba/bestaudio/best",
@@ -218,9 +223,18 @@ def youtube_pcm_cmds(source, ytdlp=None, ffmpeg=None, sample_rate=16000):
         "--extractor-args",
         "youtube:player_client=android_vr,web_safari,default",
         "-o",
-        "-",
+        str(dest),
         watch,
     ]
+
+
+def youtube_pcm_cmds(source, ytdlp=None, ffmpeg=None, sample_rate=16000):
+    watch = watch_url(video_id_from_source(source)) if video_id_from_source(source) else (source or "")
+    if not watch:
+        raise ValueError("bad youtube source")
+    ytdlp = ytdlp or _which("yt-dlp")
+    ffmpeg = ffmpeg or _which("ffmpeg")
+    ytdlp_cmd = ytdlp_download_cmd(source, "-", ytdlp=ytdlp)
     ff_cmd = [
         ffmpeg,
         "-nostdin",
@@ -291,4 +305,5 @@ __all__ = [
     "video_id_from_source",
     "watch_url",
     "youtube_pcm_cmds",
+    "ytdlp_download_cmd",
 ]

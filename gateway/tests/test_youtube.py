@@ -109,6 +109,14 @@ class YoutubeSearchTest(unittest.TestCase):
         self.assertTrue(str(path).endswith("AbC-12"))
         self.assertIn("yt-test", str(path))
 
+    def test_download_cmd_writes_file_not_stdout(self):
+        dest = "/var/cache/s3-kolonka-yt/dQw4w9WgXcQ.part"
+        cmd = youtube.ytdlp_download_cmd("yt://dQw4w9WgXcQ", dest, ytdlp="/bin/yt-dlp")
+        self.assertEqual(cmd[0], "/bin/yt-dlp")
+        self.assertIn("https://www.youtube.com/watch?v=dQw4w9WgXcQ", cmd)
+        self.assertEqual(cmd[cmd.index("-o") + 1], dest)
+        self.assertNotIn("-", cmd[cmd.index("-o") + 1 :])
+
 
 if __name__ == "__main__":
     unittest.main()

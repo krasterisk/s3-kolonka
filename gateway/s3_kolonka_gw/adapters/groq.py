@@ -29,6 +29,7 @@ from s3_kolonka_gw.pcmutil import (
     pcm16_to_wav,
     piper_to_pcm16,
     radio_drop_for_live,
+    radio_pace_sleep_s,
 )
 from s3_kolonka_gw.wake import match_wake
 
@@ -167,6 +168,12 @@ class GroqBackend(VoiceBackend):
     async def _run_turn(self, pcm: bytes):
         try:
             await self._finish_turn(pcm)
+        except Exception:
+            log.exception("turn failed")
+            try:
+                await self.status("error", "turn failed")
+            except Exception:
+                pass
         finally:
             self._busy = False
 
@@ -201,7 +208,7 @@ class GroqBackend(VoiceBackend):
                 except Exception:
                     pass
 
-    async def _pump_pcm(self, proc):
+    async def _pump_pcm(self, proc, pace=False):
         on_pcm = getattr(self, "_on_pcm", None)
         started = None
         sent = 0
@@ -216,9 +223,15 @@ class GroqBackend(VoiceBackend):
                 now = asyncio.get_event_loop().time()
                 if started is None:
                     started = now
+                    log.info("radio pcm start")
                 if radio_drop_for_live(sent, now - started):
-                    dropped += 1
-                    continue
+                    if pace:
+                        delay = radio_pace_sleep_s(sent, now - started)
+                        if delay:
+                            await asyncio.sleep(min(delay, 0.08))
+                    else:
+                        dropped += 1
+                        continue
                 if on_pcm:
                     await on_pcm(data)
                 sent += len(data)
@@ -227,8 +240,7 @@ class GroqBackend(VoiceBackend):
         except Exception as exc:
             log.warning("radio stream failed: %s", exc)
         finally:
-            if dropped:
-                log.info("radio drop %s frames to stay live", dropped)
+            log.info("radio pcm sent=%s drop=%s", sent, dropped)
             await self._kill_radio()
 
     async def _stream_radio(self, url: str):
@@ -250,42 +262,63 @@ class GroqBackend(VoiceBackend):
         self._radio_proc = proc
         await self._pump_pcm(proc)
 
-    async def _stream_youtube(self, source: str):
+    async def _ensure_youtube_file(self, source: str):
         cached = youtube.cached_file(source, self.youtube_cfg)
+        if cached:
+            log.info("youtube cache %s", cached)
+            return cached
+        vid = youtube.video_id_from_source(source)
+        dest = youtube.cache_path(vid, self.youtube_cfg)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".part")
+        if tmp.exists():
+            tmp.unlink()
+        cmd = youtube.ytdlp_download_cmd(source, tmp, ytdlp=self.youtube_cfg.get("ytdlp") or "")
+        log.info("youtube yt-dlp download %s", source)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        self._ytdlp_proc = proc
         try:
-            if cached:
-                log.info("youtube cache %s", cached)
-                cmd = youtube.ffmpeg_file_cmd(str(cached))
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                self._radio_proc = proc
-                await self._pump_pcm(proc)
-                return
-            ytdlp_cmd, ff_cmd = youtube.youtube_pcm_cmds(source)
+            _out, err = await asyncio.wait_for(proc.communicate(), timeout=90)
+        except asyncio.TimeoutError:
+            await self._kill_radio()
+            raise RuntimeError("youtube download timeout")
+        finally:
+            self._ytdlp_proc = None
+        if proc.returncode != 0:
+            raise RuntimeError((err or b"").decode("utf-8", "replace")[-240:] or "yt-dlp failed")
+        src = tmp if tmp.is_file() else None
+        if src is None:
+            extras = sorted(
+                dest.parent.glob(tmp.name + "*"),
+                key=lambda p: p.stat().st_size if p.is_file() else 0,
+                reverse=True,
+            )
+            src = extras[0] if extras else None
+        if not src or not src.is_file() or src.stat().st_size <= 4096:
+            raise RuntimeError("youtube empty download")
+        src.replace(dest)
+        return dest
+
+    async def _stream_youtube(self, source: str):
+        try:
+            path = await self._ensure_youtube_file(source)
+            cmd = youtube.ffmpeg_file_cmd(str(path))
         except Exception as exc:
             log.warning("youtube cmd: %s", exc)
             await self.status("error", "youtube: %s" % exc)
             return
-        log.info("youtube yt-dlp %s", source)
-        ytdlp = await asyncio.create_subprocess_exec(
-            *ytdlp_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        self._ytdlp_proc = ytdlp
+        log.info("youtube ffmpeg %s", path)
         proc = await asyncio.create_subprocess_exec(
-            *ff_cmd,
-            stdin=ytdlp.stdout,
+            *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        if ytdlp.stdout:
-            ytdlp.stdout.close()
         self._radio_proc = proc
-        await self._pump_pcm(proc)
+        await self._pump_pcm(proc, pace=True)
 
     async def _finish_turn(self, pcm: bytes):
         if not self.api_key:
