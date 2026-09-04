@@ -60,6 +60,24 @@ class MusicIntentTest(unittest.TestCase):
 
 
 class YoutubeSearchTest(unittest.TestCase):
+    def test_search_tracks_tries_videos_before_songs(self):
+        seen = []
+
+        def fake(query, limit=5, kind="songs"):
+            seen.append(kind)
+            if kind == "videos":
+                return [{"video_id": "vid1", "title": "clip", "url": "yt://vid1"}]
+            return []
+
+        orig = youtube.search_ytmusic
+        youtube.search_ytmusic = fake
+        try:
+            rows = youtube.search_tracks("хрум")
+        finally:
+            youtube.search_ytmusic = orig
+        self.assertEqual(seen, ["videos"])
+        self.assertEqual(rows[0]["video_id"], "vid1")
+
     def test_parse_ytdlp_search_lines(self):
         raw = "dQw4w9WgXcQ\tRick Astley - Never Gonna Give You Up\nxyz\tOther\n"
         got = youtube.parse_search_lines(raw)

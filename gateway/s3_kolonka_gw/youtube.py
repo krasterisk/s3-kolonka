@@ -133,7 +133,7 @@ def _ytmusic_rows(rows):
     return out
 
 
-def search_ytmusic(query, limit=5, kind="songs"):
+def search_ytmusic(query, limit=5, kind="videos"):
     try:
         from ytmusicapi import YTMusic
     except ImportError:
@@ -179,7 +179,7 @@ def search_tracks(query, cfg=None):
     q = strip_service_words(query)
     if not q:
         return []
-    for kind in ("songs", "videos", None):
+    for kind in ("videos", "songs", None):
         rows = search_ytmusic(q, limit=cfg["search_limit"], kind=kind)
         if rows:
             return rows
