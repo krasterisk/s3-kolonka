@@ -369,11 +369,15 @@ static int radio_event_cb(esp_asp_event_pkt_t *event, void *ctx)
 }
 
 #if RADIO_HAS_CVT
-static int radio_prev(esp_asp_handle_t handle, void *ctx)
+/* 0.9.x prev hook is (esp_asp_handle_t *, void *); 1.0 changed it to a handle. */
+static int radio_prev(esp_asp_handle_t *handle, void *ctx)
 {
     (void)ctx;
+    if (!handle || !*handle) {
+        return 0;
+    }
     esp_gmf_pipeline_handle_t pipe = NULL;
-    if (esp_audio_simple_player_get_pipeline(handle, &pipe) != ESP_OK || !pipe) {
+    if (esp_audio_simple_player_get_pipeline(*handle, &pipe) != ESP_OK || !pipe) {
         return 0;
     }
     esp_gmf_element_handle_t el = NULL;
