@@ -42,10 +42,14 @@ async def session(ws, path, cfg):
         except Exception as exc:
             log.warning("status send failed: %s", exc)
 
-    async def on_cmd(name, value=None):
+    async def on_cmd(name, value=None, url=None, title=None):
         payload = {"type": "cmd", "name": name}
         if value is not None:
             payload["value"] = value
+        if url:
+            payload["url"] = url
+        if title:
+            payload["title"] = title
         try:
             await ws.send(json.dumps(payload))
         except Exception as exc:

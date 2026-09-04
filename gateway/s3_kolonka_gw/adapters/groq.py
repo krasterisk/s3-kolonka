@@ -8,6 +8,7 @@ from pathlib import Path
 
 from s3_kolonka_gw.adapters.base import VoiceBackend
 from s3_kolonka_gw.device_ctrl import TOOLS, apply_tool, heuristic_commands, spoken_ack
+from s3_kolonka_gw import radio
 from s3_kolonka_gw.pcmutil import (
     audio_to_pcm16,
     espeak_to_pcm16,
@@ -31,16 +32,20 @@ _SYSTEM = (
     "Ты голосовой ассистент умной колонки. Отвечай кратко, по-русски, "
     "без списков и разметки. Одно-три предложения. "
     "Если просят громкость, яркость, выключить или включить колонку — "
-    "вызови соответствующую функцию."
+    "вызови соответствующую функцию. "
+    "Если просят включить радио или станцию — вызови play_radio с тем, "
+    "как сказал пользователь. Выключить радио — stop_radio. "
+    "Не выдумывай URL потока."
 )
 
 
 class GroqBackend(VoiceBackend):
     name = "groq"
 
-    def __init__(self, cfg=None):
+    def __init__(self, cfg=None, radio_cfg=None):
         cfg = cfg or {}
         self.api_key = (cfg.get("api_key") or os.environ.get("GROQ_API_KEY") or "").strip()
+        self.radio_cfg = radio.normalize_config(radio_cfg)
         self.stt_model = cfg.get("stt_model") or "whisper-large-v3-turbo"
         self.llm_model = cfg.get("llm_model") or "openai/gpt-oss-20b"
         self.voice = cfg.get("voice") or "ru-RU-SvetlanaNeural"
@@ -192,6 +197,14 @@ class GroqBackend(VoiceBackend):
             await self._emit_cmds(cmds)
             if not reply:
                 reply = spoken_ack(cmds)
+        radio_cmd = next((c for c in cmds if c.get("name") == "radio_play"), None)
+        if radio_cmd:
+            title = radio_cmd.get("title") or "радио"
+            await self.status("radio", title, heard=user_text, reply=title)
+            return
+        if any(c.get("name") == "radio_stop" for c in cmds):
+            await self.status("idle", "groq", heard=user_text, reply=reply or "Радио выключено.")
+            return
         if not reply:
             await self.status("idle", "groq: empty llm")
             return
@@ -240,8 +253,8 @@ class GroqBackend(VoiceBackend):
             elif name == "brightness":
                 self._bl = int(cmd.get("value") or self._bl)
             if cb:
-                await cb(name, cmd.get("value"))
-            log.info("cmd %s %s", name, cmd.get("value"))
+                await cb(name, cmd.get("value"), url=cmd.get("url"), title=cmd.get("title"))
+            log.info("cmd %s %s", name, cmd.get("value") or cmd.get("title") or "")
 
     def _headers(self, extra=None):
         headers = {
@@ -326,11 +339,26 @@ class GroqBackend(VoiceBackend):
                     args = {}
                 extra, vol, bl = apply_tool(name, args, vol, bl)
                 cmds.extend(extra)
+                tool_body = extra or {"ok": True}
+                if name == "play_radio":
+                    picked = self._pick_radio((args.get("query") or user_text or "").strip())
+                    if picked:
+                        extra = [
+                            {
+                                "name": "radio_play",
+                                "url": picked["url"],
+                                "title": picked.get("title") or picked.get("name"),
+                            }
+                        ]
+                        cmds.extend(extra)
+                        tool_body = {"ok": True, "title": extra[0]["title"], "uuid": picked["uuid"]}
+                    else:
+                        tool_body = {"ok": False, "error": "no station"}
                 messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": call.get("id") or name,
-                        "content": json.dumps(extra or {"ok": True}),
+                        "content": json.dumps(tool_body),
                     }
                 )
             follow = self._complete(messages, use_tools=False)
@@ -341,6 +369,33 @@ class GroqBackend(VoiceBackend):
         self._history.append({"role": "user", "content": user_text})
         self._history.append({"role": "assistant", "content": reply or spoken_ack(cmds)})
         return reply, cmds
+
+    def _pick_radio(self, query: str):
+        def picker(q, cands):
+            slim = [
+                {
+                    "uuid": c["uuid"],
+                    "name": c["name"],
+                    "bitrate": c["bitrate"],
+                    "countrycode": c.get("countrycode") or "",
+                }
+                for c in cands
+            ]
+            prompt = radio.PICKER_PROMPT % (q, json.dumps(slim, ensure_ascii=False))
+            payload = self._complete(
+                [
+                    {"role": "system", "content": "Pick one station. JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                use_tools=False,
+            )
+            return (payload["choices"][0]["message"].get("content") or "")
+
+        try:
+            return radio.resolve_station(query, self.radio_cfg, picker_fn=picker, opener=self._opener)
+        except Exception as exc:
+            log.warning("radio resolve failed: %s", exc)
+            return None
 
     def _tts_groq(self, text: str) -> bytes:
         body = json.dumps(

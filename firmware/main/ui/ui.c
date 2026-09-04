@@ -39,6 +39,9 @@ static void on_wake(void)
     if (app_audio_is_listening() || app_audio_is_playing() || !app_brain_ready()) {
         return;
     }
+    if (app_audio_is_radio()) {
+        app_audio_radio_stop();
+    }
     if (s_asleep) {
         ui_set_asleep(false);
     }
@@ -56,6 +59,9 @@ static void on_listen_click(lv_event_t *e)
         ui_set_asleep(false);
     }
     app_brain_set_wake_mode(false);
+    if (next && app_audio_is_radio()) {
+        app_audio_radio_stop();
+    }
     app_audio_set_listen(next);
     app_brain_set_listen(next);
     set_listen_visual(next);
@@ -225,10 +231,18 @@ void ui_tick(void)
     }
     lv_arc_set_value(s_arc, (listening || !s_asleep) ? app_audio_mic_level() : 0);
 
-    char cmd[16];
+    char cmd[24];
     int value = 0;
     if (app_brain_take_cmd(cmd, sizeof(cmd), &value)) {
-        if (strcmp(cmd, "volume") == 0) {
+        if (strcmp(cmd, "radio_play") == 0) {
+            const char *url = app_brain_cmd_url();
+            const char *title = app_brain_cmd_title();
+            if (app_audio_radio_start(url) && title && title[0] && s_reply) {
+                lv_label_set_text(s_reply, title);
+            }
+        } else if (strcmp(cmd, "radio_stop") == 0) {
+            app_audio_radio_stop();
+        } else if (strcmp(cmd, "volume") == 0) {
             app_audio_set_volume(value);
             lv_slider_set_value(s_vol, app_audio_get_volume(), LV_ANIM_OFF);
         } else if (strcmp(cmd, "brightness") == 0) {

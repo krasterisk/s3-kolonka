@@ -11,7 +11,7 @@ def create_backend(cfg: dict) -> VoiceBackend:
     if name == "mock":
         return MockBackend()
     if name == "groq":
-        return GroqBackend(cfg.get("groq") or {})
+        return GroqBackend(cfg.get("groq") or {}, radio_cfg=cfg.get("radio") or {})
     if name == "gemini":
         g = cfg.get("gemini") or {}
         return GeminiBackend(api_key=g.get("api_key") or "", model=g.get("model") or "")

@@ -9,6 +9,7 @@
 #endif
 
 #include "driver/gpio.h"
+#include "esp_audio_simple_player.h"
 #include "esp_board_init.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -34,6 +35,8 @@ static SemaphoreHandle_t s_i2s;
 static app_audio_mic_sink_t s_mic_sink;
 static app_audio_wake_cb_t s_wake_cb;
 static bool s_mww;
+static volatile bool s_radio;
+static esp_asp_handle_t s_radio_player;
 
 static void pa_on(void)
 {
@@ -262,6 +265,9 @@ bool app_audio_is_playing(void)
 
 void app_audio_play_pcm16(const int16_t *stereo, int samples)
 {
+    if (s_radio) {
+        return;
+    }
     if (!stereo || samples <= 0) {
         return;
     }
@@ -314,6 +320,80 @@ void app_audio_play_abort(void)
     }
 }
 
+static int radio_out_cb(uint8_t *data, int data_size, void *ctx)
+{
+    (void)ctx;
+    if (!s_radio || !data || data_size <= 0) {
+        return 0;
+    }
+    if (s_i2s) {
+        xSemaphoreTake(s_i2s, portMAX_DELAY);
+    }
+    pa_on();
+    esp_audio_play((int16_t *)data, data_size, portMAX_DELAY);
+    if (s_i2s) {
+        xSemaphoreGive(s_i2s);
+    }
+    return 0;
+}
+
+static bool radio_url_ok(const char *url)
+{
+    if (!url || !url[0]) {
+        return false;
+    }
+    if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
+        return false;
+    }
+    if (strstr(url, ".m3u8") || strstr(url, ".m3u")) {
+        return false;
+    }
+    return true;
+}
+
+void app_audio_radio_stop(void)
+{
+    if (s_radio_player) {
+        esp_asp_state_t st = ESP_ASP_STATE_NONE;
+        if (esp_audio_simple_player_get_state(s_radio_player, &st) == ESP_OK &&
+            st != ESP_ASP_STATE_NONE) {
+            esp_audio_simple_player_stop(s_radio_player);
+        }
+    }
+    s_radio = false;
+    if (!s_playing) {
+        pa_off();
+    }
+    if (s_mww) {
+        mww_reset();
+    }
+}
+
+bool app_audio_radio_start(const char *url)
+{
+    if (!radio_url_ok(url) || !s_radio_player) {
+        ESP_LOGW(TAG, "radio reject url");
+        return false;
+    }
+    app_audio_play_abort();
+    app_audio_radio_stop();
+    s_radio = true;
+    pa_on();
+    if (esp_audio_simple_player_run(s_radio_player, url, NULL) != ESP_OK) {
+        ESP_LOGW(TAG, "radio run fail");
+        s_radio = false;
+        pa_off();
+        return false;
+    }
+    ESP_LOGI(TAG, "radio start");
+    return true;
+}
+
+bool app_audio_is_radio(void)
+{
+    return s_radio;
+}
+
 void app_audio_start(void)
 {
     gpio_reset_pin(PA_GPIO);
@@ -323,6 +403,16 @@ void app_audio_start(void)
 
     app_audio_set_volume(s_volume);
     app_audio_chime();
+    esp_asp_cfg_t radio_cfg = {
+        .in.cb = NULL,
+        .in.user_ctx = NULL,
+        .out.cb = radio_out_cb,
+        .out.user_ctx = NULL,
+    };
+    if (esp_audio_simple_player_new(&radio_cfg, &s_radio_player) != ESP_OK) {
+        s_radio_player = NULL;
+        ESP_LOGW(TAG, "radio player init failed");
+    }
     s_mww = mww_start();
     if (!s_mww) {
         ESP_LOGW(TAG, "mww off, tap listen only");

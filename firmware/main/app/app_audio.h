@@ -22,3 +22,6 @@ void app_audio_play_pcm16(const int16_t *stereo, int samples);
 bool app_audio_is_playing(void);
 void app_audio_play_end(void);
 void app_audio_play_abort(void);
+bool app_audio_radio_start(const char *url);
+void app_audio_radio_stop(void);
+bool app_audio_is_radio(void);

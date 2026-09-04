@@ -25,8 +25,8 @@ ends the turn (silence / max length).
 | --- | --- | --- |
 | `hello` | `backend`, `sample_rate` | Connection accepted. |
 | `status` | `state`, `detail`, optional `heard`, `reply` | UI state. `heard` is the recognized phrase, `reply` is the spoken answer. |
-| `cmd` | `name`, `value` | Device control: `volume`, `brightness`, `power_off`, `power_on`. |
-| binary | PCM16 | TTS playback. Valid only after `status.state=speaking`. A new `listen` or `live`/`thinking`/`error` aborts leftover audio. |
+| `cmd` | `name`, `value`, optional `url`, `title` | Device control: `volume`, `brightness`, `power_off`, `power_on`, `radio_play`, `radio_stop`. |
+| binary | PCM16 | TTS playback. Valid only after `status.state=speaking`. A new `listen` or `live`/`thinking`/`error`/`radio` aborts leftover audio. |
 
 ### `status.state`
 
@@ -37,8 +37,11 @@ ends the turn (silence / max length).
 | `thinking` | STT / LLM in progress |
 | `speaking` | Playing TTS |
 | `error` | Failed turn |
+| `radio` | Playing Icecast MP3; `reply` is the station title |
 
-`thinking`, `speaking`, `idle`, and `error` end the listen UI on the device.
+`thinking`, `speaking`, `idle`, `radio`, and `error` end the listen UI on the device.
+
+`radio_play` must be HTTP(S) MP3 Icecast. HLS / m3u8 is rejected. Radio and TTS never share the DAC.
 
 Wake words (when `mode=wake`): «колонка», «слушай», «kolonka», «проснись».
 A tap Listen still processes speech without a wake word.

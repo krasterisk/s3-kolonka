@@ -65,6 +65,34 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "play_radio",
+            "description": (
+                "Play an internet radio station by spoken name or style, "
+                "for example Европа Плюс or jazz radio. Search happens on the server."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Station name or genre as the user said it.",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_radio",
+            "description": "Stop internet radio playback.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 
@@ -90,6 +118,8 @@ def apply_tool(name: str, args: dict, vol: int, bl: int) -> tuple[list[dict], in
         cmds.append({"name": "power_off"})
     elif name == "power_on":
         cmds.append({"name": "power_on"})
+    elif name == "stop_radio":
+        cmds.append({"name": "radio_stop"})
     return cmds, vol, bl
 
 
@@ -116,6 +146,9 @@ def heuristic_commands(text: str, vol: int, bl: int) -> list[dict]:
         bl = clamp(bl - 20, 5, 100)
         cmds.append({"name": "brightness", "value": bl})
 
+    if re.search(r"выключи\s+радио|стоп\s+радио|останови\s+радио", t):
+        cmds.append({"name": "radio_stop"})
+
     if re.search(r"включись|проснись|очнись|включи\s+экран", t):
         cmds.append({"name": "power_on"})
     elif re.search(r"выключись|усни|спи$|спать|погаси", t):
@@ -137,4 +170,8 @@ def spoken_ack(cmds: list[dict]) -> str:
         return "Выключаюсь."
     if name == "power_on":
         return "Включилась."
+    if name == "radio_stop":
+        return "Радио выключено."
+    if name == "radio_play":
+        return "Включаю %s." % (last.get("title") or "радио")
     return "Готово."

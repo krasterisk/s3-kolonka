@@ -35,8 +35,10 @@ static char s_status[48] = "Brain: wait";
 static char s_backend[16] = "gw";
 static char s_heard[256];
 static char s_reply[256];
-static char s_cmd_name[16];
+static char s_cmd_name[24];
 static int s_cmd_value;
+static char s_cmd_url[256];
+static char s_cmd_title[64];
 static char s_brain_uri[96];
 static RingbufHandle_t s_play_rb;
 static RingbufHandle_t s_up_rb;
@@ -166,15 +168,16 @@ static void handle_text(const char *data, int len)
                 copy_utf8(s_reply, sizeof(s_reply), reply->valuestring);
             }
             if (strcmp(st, "live") == 0 || strcmp(st, "thinking") == 0 ||
-                strcmp(st, "error") == 0) {
+                strcmp(st, "error") == 0 || strcmp(st, "radio") == 0) {
                 request_abort_play();
             } else if (strcmp(st, "speaking") == 0) {
                 s_accept_play = true;
+                app_audio_radio_stop();
             } else if (strcmp(st, "idle") == 0) {
                 s_accept_play = false;
             }
             if (strcmp(st, "thinking") == 0 || strcmp(st, "speaking") == 0 ||
-                strcmp(st, "error") == 0) {
+                strcmp(st, "error") == 0 || strcmp(st, "radio") == 0) {
                 s_end_listen = true;
             } else if (strcmp(st, "idle") == 0) {
                 if (s_skip_idle) {
@@ -190,6 +193,16 @@ static void handle_text(const char *data, int len)
                 strncpy(s_cmd_name, name->valuestring, sizeof(s_cmd_name) - 1);
                 s_cmd_name[sizeof(s_cmd_name) - 1] = 0;
                 s_cmd_value = cJSON_IsNumber(value) ? (int)value->valuedouble : 0;
+                const cJSON *url = cJSON_GetObjectItem(root, "url");
+                const cJSON *title = cJSON_GetObjectItem(root, "title");
+                s_cmd_url[0] = 0;
+                s_cmd_title[0] = 0;
+                if (cJSON_IsString(url) && url->valuestring) {
+                    copy_utf8(s_cmd_url, sizeof(s_cmd_url), url->valuestring);
+                }
+                if (cJSON_IsString(title) && title->valuestring) {
+                    copy_utf8(s_cmd_title, sizeof(s_cmd_title), title->valuestring);
+                }
                 s_cmd_ready = true;
             }
         }
@@ -405,6 +418,7 @@ static void brain_task(void *arg)
             }
             if (s_listen) {
                 request_abort_play();
+                app_audio_radio_stop();
                 send_json(s_wake_mode ? "{\"type\":\"listen\",\"mode\":\"wake\"}"
                                       : "{\"type\":\"listen\",\"mode\":\"tap\"}");
                 app_audio_flush_preroll();
@@ -469,6 +483,16 @@ bool app_brain_take_cmd(char *name, int name_len, int *value)
     name[name_len - 1] = 0;
     *value = s_cmd_value;
     return true;
+}
+
+const char *app_brain_cmd_url(void)
+{
+    return s_cmd_url;
+}
+
+const char *app_brain_cmd_title(void)
+{
+    return s_cmd_title;
 }
 
 const char *app_brain_status(void)
