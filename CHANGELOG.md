@@ -16,6 +16,7 @@ and this project uses [Semantic Versioning](https://semver.org/) after 1.0.0.
 ### Changed
 
 - Gateway host and port are Kconfig options (not a hardcoded public IP)
+- Round UI is split into Home / Media / Settings instead of one crowded screen
 
 ## [0.1.0] - 2026-09-03
 

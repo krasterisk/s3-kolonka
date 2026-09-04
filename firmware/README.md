@@ -28,5 +28,5 @@ idf.py -p <PORT> flash monitor
 
 - `components/auido_borad` keeps the upstream Waveshare directory name
 - LVGL demo sources under `main/LVGL_UI/` are linked for the vendor drivers;
-  the home screen is `main/ui/`
+  the UI is `main/ui/` (Home / Media / Settings)
 - SoftAP SSID is `s3-kolonka`. Wi-Fi is 2.4 GHz only

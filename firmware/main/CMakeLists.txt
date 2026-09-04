@@ -2,6 +2,9 @@ idf_component_register(
                          SRCS 
                               "./main.c"
                               "./ui/ui.c"
+                              "./ui/ui_home.c"
+                              "./ui/ui_media.c"
+                              "./ui/ui_settings.c"
                               "./ui/fonts/font_ru_12.c"
                               "./ui/fonts/font_ru_14.c"
                               "./app/app_audio.c"
