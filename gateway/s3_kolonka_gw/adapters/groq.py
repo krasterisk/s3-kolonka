@@ -362,12 +362,43 @@ class GroqBackend(VoiceBackend):
             return
         if radio_err:
             reply = radio_err
-        if cmds:
-            await self._emit_cmds(cmds)
+        play_cmds = [c for c in cmds if c.get("name") == "radio_play"]
+        other = [c for c in cmds if c.get("name") != "radio_play"]
+        yt_cmd = next(
+            (c for c in play_cmds if youtube.is_youtube_source(c.get("source") or "")),
+            None,
+        )
+        radio_cmd = next(
+            (c for c in play_cmds if not youtube.is_youtube_source(c.get("source") or "")),
+            None,
+        )
+        if other:
+            await self._emit_cmds(other)
             if not reply:
-                reply = spoken_ack(cmds)
-        radio_cmd = next((c for c in cmds if c.get("name") == "radio_play"), None)
+                reply = spoken_ack(other)
+        if yt_cmd:
+            await self.status("thinking", "youtube fetch", heard=user_text)
+            ready = await self._prepare_youtube(user_text, yt_cmd)
+            if not ready:
+                await self._speak(
+                    radio_err or "Не нашла трек. Назовите песню или исполнителя.",
+                    heard=user_text,
+                )
+                return
+            await self._emit_cmds([ready])
+            title = ready.get("title") or "YouTube"
+            source = ready.get("source") or ""
+            self._arm_tts()
+            await self.status("radio", title, heard=user_text, reply=title)
+            stream_gen = self._gen
+            await self._stream_radio(source)
+            if self._gen == stream_gen:
+                await self.status("idle", "groq")
+            return
         if radio_cmd:
+            await self._emit_cmds([radio_cmd])
+            if not reply:
+                reply = spoken_ack([radio_cmd])
             title = radio_cmd.get("title") or "радио"
             source = radio_cmd.get("source") or ""
             self._arm_tts()
@@ -571,11 +602,64 @@ class GroqBackend(VoiceBackend):
         self._history.append({"role": "assistant", "content": reply or spoken_ack(cmds)})
         return reply, cmds
 
+    async def _prepare_youtube(self, query, first=None):
+        rows = []
+        if first:
+            source = (first.get("source") or first.get("url") or "").strip()
+            vid = youtube.video_id_from_source(source) or (first.get("video_id") or "")
+            if vid:
+                rows.append(
+                    {
+                        "video_id": vid,
+                        "title": first.get("title") or "YouTube",
+                        "url": source or ("yt://%s" % vid),
+                        "query": query,
+                    }
+                )
+        loop = asyncio.get_event_loop()
+        more = await loop.run_in_executor(
+            None, lambda: list(youtube.iter_track_candidates(query, self.youtube_cfg))
+        )
+        merged = []
+        seen = set()
+        for row in list(rows) + list(more or []):
+            vid = (row.get("video_id") or youtube.video_id_from_source(row.get("url") or "") or "").strip()
+            if not vid or vid in seen:
+                continue
+            seen.add(vid)
+            item = dict(row)
+            item["video_id"] = vid
+            item["url"] = (item.get("url") or ("yt://%s" % vid)).strip()
+            merged.append(item)
+
+        async def download(row):
+            await self._ensure_youtube_file(row["url"])
+
+        for row in merged[:5]:
+            try:
+                await download(row)
+            except Exception as exc:
+                log.warning("youtube skip %s: %s", row.get("video_id"), exc)
+                continue
+            log.info(
+                "youtube pick %s %s q=%s",
+                row.get("video_id"),
+                row.get("title"),
+                row.get("query") or query,
+            )
+            return youtube.device_music_cmd(row)
+        return None
+
     def _pick_music(self, query: str):
         try:
             picked = youtube.resolve_track(query, self.youtube_cfg)
             if picked:
-                log.info("youtube pick %s %s", picked.get("video_id"), picked.get("title"))
+                log.info(
+                    "youtube search %s %s q=%s",
+                    picked.get("video_id"),
+                    picked.get("title"),
+                    picked.get("query") or query,
+                )
             return picked
         except Exception as exc:
             log.warning("youtube resolve failed: %s", exc)

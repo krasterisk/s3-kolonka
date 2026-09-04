@@ -194,14 +194,50 @@ def search_tracks(query, cfg=None):
     return search_ytdlp(q, cfg)
 
 
-def resolve_track(query, cfg=None, search_fn=None):
+def iter_track_candidates(query, cfg=None, search_fn=None):
     finder = search_fn or search_tracks
+    seen = set()
     for part in query_alternatives(query) or [strip_service_words(query)]:
         if not part:
             continue
-        rows = finder(part, cfg)
-        if rows:
-            return dict(rows[0])
+        for row in finder(part, cfg) or []:
+            vid = (row.get("video_id") or "").strip()
+            if not vid or vid in seen:
+                continue
+            seen.add(vid)
+            item = dict(row)
+            item["query"] = part
+            yield item
+
+
+def resolve_track(query, cfg=None, search_fn=None):
+    for row in iter_track_candidates(query, cfg, search_fn):
+        return dict(row)
+    return None
+
+
+def ytdlp_error_unavailable(err):
+    msg = (err or "").lower()
+    return any(
+        needle in msg
+        for needle in (
+            "not available",
+            "video unavailable",
+            "private video",
+            "copyright",
+        )
+    )
+
+
+def first_playable_track(candidates, download_fn, limit=5):
+    for i, row in enumerate(candidates or []):
+        if i >= limit:
+            break
+        try:
+            download_fn(row)
+        except Exception:
+            continue
+        return dict(row)
     return None
 
 
@@ -305,7 +341,9 @@ __all__ = [
     "cache_path",
     "device_music_cmd",
     "ffmpeg_file_cmd",
+    "first_playable_track",
     "is_youtube_source",
+    "iter_track_candidates",
     "normalize_config",
     "parse_search_lines",
     "resolve_track",
@@ -314,4 +352,5 @@ __all__ = [
     "watch_url",
     "youtube_pcm_cmds",
     "ytdlp_download_cmd",
+    "ytdlp_error_unavailable",
 ]

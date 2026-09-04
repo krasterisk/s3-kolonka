@@ -115,6 +115,41 @@ class YoutubeSearchTest(unittest.TestCase):
         self.assertEqual(picked["video_id"], "vid1")
         self.assertEqual(picked["url"], "yt://vid1")
 
+    def test_iter_yields_all_alternatives_and_rows(self):
+        def search(query, _cfg):
+            if query == "сказочный детектив":
+                return [
+                    {"video_id": "dead01", "title": "blocked", "url": "yt://dead01"},
+                    {"video_id": "tale01", "title": "Сказочный детектив", "url": "yt://tale01"},
+                ]
+            if query == "хрум":
+                return [{"video_id": "hrum01", "title": "Хрум", "url": "yt://hrum01"}]
+            return []
+
+        rows = list(youtube.iter_track_candidates("хром или сказочный детектив", search_fn=search))
+        self.assertEqual([r["video_id"] for r in rows], ["dead01", "tale01", "hrum01"])
+        self.assertEqual(rows[0]["query"], "сказочный детектив")
+        self.assertEqual(rows[2]["query"], "хрум")
+
+    def test_first_playable_skips_unavailable(self):
+        cands = [
+            {"video_id": "peDON2N4CoQ", "title": "ТУТХАМОН", "url": "yt://peDON2N4CoQ"},
+            {"video_id": "tale01", "title": "Сказочный детектив", "url": "yt://tale01"},
+        ]
+        tried = []
+
+        def download(row):
+            tried.append(row["video_id"])
+            if row["video_id"] == "peDON2N4CoQ":
+                raise RuntimeError("ERROR: [youtube] peDON2N4CoQ: This video is not available")
+            return "/cache/" + row["video_id"]
+
+        picked = youtube.first_playable_track(cands, download)
+        self.assertEqual(tried, ["peDON2N4CoQ", "tale01"])
+        self.assertEqual(picked["video_id"], "tale01")
+        self.assertTrue(youtube.ytdlp_error_unavailable("ERROR: [youtube] x: This video is not available"))
+        self.assertIsNone(youtube.first_playable_track(cands[:1], download))
+
     def test_watch_url_and_pcm_cmds(self):
         self.assertEqual(youtube.watch_url("dQw4w9WgXcQ"), "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
         ytdlp, ff = youtube.youtube_pcm_cmds("yt://dQw4w9WgXcQ", ytdlp="/bin/yt-dlp", ffmpeg="/bin/ffmpeg")

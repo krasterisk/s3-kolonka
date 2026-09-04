@@ -97,5 +97,41 @@ class TurnAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(backend.chunks), before + 1)
 
 
+class PrepareYoutubeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_prepare_skips_unavailable_then_returns_playable(self):
+        from pathlib import Path
+
+        from s3_kolonka_gw import youtube as yt
+
+        backend = GroqBackend({"api_key": "test"})
+        first = {"source": "yt://peDON2N4CoQ", "title": "ТУТХАМОН", "video_id": "peDON2N4CoQ"}
+        tried = []
+
+        def fake_iter(query, cfg=None, search_fn=None):
+            return [
+                {"video_id": "peDON2N4CoQ", "title": "ТУТХАМОН", "url": "yt://peDON2N4CoQ", "query": "хрум"},
+                {"video_id": "tale01", "title": "Сказочный детектив", "url": "yt://tale01", "query": "сказочный детектив"},
+            ]
+
+        async def fake_ensure(source):
+            tried.append(source)
+            if "peDON2N4CoQ" in source:
+                raise RuntimeError("ERROR: [youtube] peDON2N4CoQ: This video is not available")
+            return Path("/tmp/tale01")
+
+        orig = yt.iter_track_candidates
+        yt.iter_track_candidates = fake_iter
+        backend._ensure_youtube_file = fake_ensure
+        try:
+            ready = await backend._prepare_youtube("хрум или сказочный детектив", first)
+        finally:
+            yt.iter_track_candidates = orig
+
+        self.assertEqual(tried, ["yt://peDON2N4CoQ", "yt://tale01"])
+        self.assertEqual(ready["name"], "radio_play")
+        self.assertEqual(ready["source"], "yt://tale01")
+        self.assertEqual(ready["title"], "Сказочный детектив")
+
+
 if __name__ == "__main__":
     unittest.main()
