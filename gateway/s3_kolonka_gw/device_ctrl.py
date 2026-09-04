@@ -73,10 +73,11 @@ TOOLS = [
         "function": {
             "name": "play_radio",
             "description": (
-                "Play internet radio by station name or genre "
-                "(рок, металл, джаз, Европа Плюс). "
+                "Play internet radio. Call only when the user said the word "
+                "«радио» (включи радио Европа Плюс, радио рок). "
                 "The server finds a close match or asks to clarify. "
-                "Do not invent station names or stream URLs."
+                "Do not invent station names or stream URLs. "
+                "Without the word радио use play_music."
             ),
             "parameters": {
                 "type": "object",
@@ -95,10 +96,11 @@ TOOLS = [
         "function": {
             "name": "play_music",
             "description": (
-                "Play a song, artist, or YouTube clip by spoken name "
-                "(Кино Группа крови, Beatles Yesterday). "
-                "The server searches YouTube Music and streams audio only. "
-                "Do not invent video IDs or URLs. Not for radio stations."
+                "Play a song, artist, cartoon, or YouTube clip by spoken name "
+                "(Кино Группа крови, хрум, сказочный детектив). "
+                "Default for включи/поставь when the user did not say радио. "
+                "The server searches YouTube and streams audio only. "
+                "Do not invent video IDs or URLs."
             ),
             "parameters": {
                 "type": "object",
@@ -191,36 +193,26 @@ _RADIO_STOP = re.compile(
     r"выключи\s+радио|стоп\s+радио|останови\s+радио|выруби\s+радио|"
     r"выключи\s+музык|стоп\s+музык|останови\s+песн|выключи\s+песн"
 )
-_MUSIC_PLAY = re.compile(
-    r"(?:включ(?:и|ить|ай)|поставь|играй|запусти)\s+"
-    r"(?:на\s+)?(?:песн[ауию]|трек|клип|музык[ауи]|ютуб[еа]?|youtube)\s+"
-    r"(?:на\s+(?:ютуб[еа]?|youtube)\s+)?"
-    r"(.*)$",
+_PLAY = re.compile(
+    r"(?:включ(?:и|ить|ай)|поставь|играй|запусти)\s+(.*)$",
     re.IGNORECASE | re.DOTALL,
 )
 _RADIO_PLAY = re.compile(
     r"(?:включ(?:и|ить|ай)|поставь|играй|запусти)\s+(?:радио\s*)?(.*)$",
     re.IGNORECASE | re.DOTALL,
 )
+_HAS_YOUTUBE = re.compile(r"youtube|ютуб", re.IGNORECASE)
+_MUSIC_LEAD = re.compile(
+    r"^(?:(?:с|на)\s+)?(?:песн[ауию]|трек|клип|музык[ауи]|ютуб[аеу]?|youtube)\b",
+    re.IGNORECASE,
+)
+_STRIP_MUSIC_LEAD = re.compile(
+    r"^(?:песн[ауию]|трек|клип|музык[ауи])\s+",
+    re.IGNORECASE,
+)
 _NOT_STATION = re.compile(
     r"^(экран|колонк|звук|микрофон|себя|свет|яркост|громкост)"
 )
-
-
-def music_play_query(text: str) -> str | None:
-    t = (text or "").strip()
-    if not t:
-        return None
-    low = t.lower()
-    if _RADIO_STOP.search(low):
-        return None
-    m = _MUSIC_PLAY.search(low)
-    if not m:
-        return None
-    query = (m.group(1) or "").strip(" \t.!?,…«»\"'")
-    if _NOT_STATION.search(query):
-        return None
-    return query
 
 
 def radio_play_query(text: str) -> str | None:
@@ -230,7 +222,12 @@ def radio_play_query(text: str) -> str | None:
     low = t.lower()
     if _RADIO_STOP.search(low):
         return None
-    if music_play_query(t) is not None:
+    if "радио" not in low:
+        return None
+    if _HAS_YOUTUBE.search(low):
+        return None
+    obj_m = _PLAY.search(low)
+    if obj_m and _MUSIC_LEAD.search((obj_m.group(1) or "").strip()):
         return None
     m = _RADIO_PLAY.search(low)
     if not m:
@@ -239,6 +236,25 @@ def radio_play_query(text: str) -> str | None:
     if _NOT_STATION.search(query):
         return None
     return query
+
+
+def music_play_query(text: str) -> str | None:
+    t = (text or "").strip()
+    if not t:
+        return None
+    low = t.lower()
+    if _RADIO_STOP.search(low):
+        return None
+    if radio_play_query(t) is not None:
+        return None
+    m = _PLAY.search(low)
+    if not m:
+        return None
+    query = youtube.strip_service_words(m.group(1) or "")
+    query = _STRIP_MUSIC_LEAD.sub("", query).strip()
+    if _NOT_STATION.search(query):
+        return None
+    return query or None
 
 
 def attach_music_play(cmds: list[dict], user_text: str, pick_fn) -> tuple[list[dict], str | None]:

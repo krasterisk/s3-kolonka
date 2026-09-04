@@ -71,6 +71,33 @@ def cache_path(video_id, cfg):
     return Path(cfg["cache_dir"]) / safe
 
 
+def strip_service_words(text):
+    q = (text or "").strip()
+    q = re.sub(r"\b(?:с|на)\s+(?:youtube|ютуб[аеу]?)\b", " ", q, flags=re.I)
+    q = re.sub(r"\b(?:youtube|ютуб[аеу]?)\b", " ", q, flags=re.I)
+    return re.sub(r"\s+", " ", q).strip(" \t.!?,…«»\"'")
+
+
+_STT_ALIASES = {
+    "хром": "хрум",
+}
+
+
+def query_alternatives(query):
+    q = strip_service_words(query)
+    if not q:
+        return []
+    parts = [p.strip(" \t.!?,…") for p in re.split(r"\s+или\s+", q, flags=re.I) if p.strip()]
+    out = []
+    for part in parts:
+        if part and part not in out:
+            out.append(part)
+        alias = _STT_ALIASES.get(part.lower())
+        if alias and alias not in out:
+            out.append(alias)
+    return out
+
+
 def parse_search_lines(text):
     out = []
     for line in (text or "").splitlines():
@@ -86,14 +113,9 @@ def parse_search_lines(text):
     return out
 
 
-def search_ytmusic(query, limit=5):
-    try:
-        from ytmusicapi import YTMusic
-    except ImportError:
-        return []
-    rows = YTMusic().search(query, filter="songs", limit=limit) or []
+def _ytmusic_rows(rows):
     out = []
-    for row in rows:
+    for row in rows or []:
         vid = (row.get("videoId") or "").strip()
         if not _ID_RE.match(vid):
             continue
@@ -105,6 +127,19 @@ def search_ytmusic(query, limit=5):
             title = "%s — %s" % (artists, title)
         out.append({"video_id": vid, "title": title, "url": "yt://%s" % vid})
     return out
+
+
+def search_ytmusic(query, limit=5, kind="songs"):
+    try:
+        from ytmusicapi import YTMusic
+    except ImportError:
+        return []
+    client = YTMusic()
+    if kind:
+        rows = client.search(query, filter=kind, limit=limit) or []
+    else:
+        rows = client.search(query, limit=limit) or []
+    return _ytmusic_rows(rows)
 
 
 def search_ytdlp(query, cfg, runner=None):
@@ -137,20 +172,25 @@ def search_ytdlp(query, cfg, runner=None):
 
 def search_tracks(query, cfg=None):
     cfg = normalize_config(cfg)
-    q = (query or "").strip()
+    q = strip_service_words(query)
     if not q:
         return []
-    rows = search_ytmusic(q, limit=cfg["search_limit"])
-    if rows:
-        return rows
+    for kind in ("songs", "videos", None):
+        rows = search_ytmusic(q, limit=cfg["search_limit"], kind=kind)
+        if rows:
+            return rows
     return search_ytdlp(q, cfg)
 
 
 def resolve_track(query, cfg=None, search_fn=None):
-    rows = search_fn(query, cfg) if search_fn else search_tracks(query, cfg)
-    if not rows:
-        return None
-    return dict(rows[0])
+    finder = search_fn or search_tracks
+    for part in query_alternatives(query) or [strip_service_words(query)]:
+        if not part:
+            continue
+        rows = finder(part, cfg)
+        if rows:
+            return dict(rows[0])
+    return None
 
 
 def device_music_cmd(picked):

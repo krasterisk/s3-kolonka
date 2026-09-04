@@ -440,7 +440,7 @@ class RadioHeuristicTest(unittest.TestCase):
         self.assertEqual(radio_play_query("включай радио европа плюс"), "европа плюс")
         self.assertEqual(radio_play_query("поставь радио джаз"), "джаз")
         self.assertEqual(radio_play_query("включи радиорок"), "рок")
-        self.assertEqual(radio_play_query("включи маяк"), "маяк")
+        self.assertIsNone(radio_play_query("включи маяк"))
         self.assertEqual(radio_play_query("включи радио"), "")
         self.assertIsNone(radio_play_query("выключи радио"))
         self.assertIsNone(radio_play_query("включи экран"))

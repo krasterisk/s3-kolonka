@@ -14,12 +14,28 @@ class MusicIntentTest(unittest.TestCase):
         self.assertEqual(music_play_query("поставь трек beatles yesterday"), "beatles yesterday")
         self.assertEqual(music_play_query("включи клип группа крови"), "группа крови")
         self.assertEqual(music_play_query("включи на ютубе кино"), "кино")
+        self.assertEqual(
+            music_play_query("Включи с YouTube хром или сказочный детектив"),
+            "хром или сказочный детектив",
+        )
+        self.assertEqual(
+            music_play_query("включи хром или сказочный детектив"),
+            "хром или сказочный детектив",
+        )
+        self.assertEqual(music_play_query("включи маяк"), "маяк")
+        self.assertEqual(music_play_query("включи сказочный детектив"), "сказочный детектив")
         self.assertIsNone(music_play_query("включи радио рок-фм"))
+        self.assertIsNone(music_play_query("включи радио маяк"))
         self.assertIsNone(music_play_query("выключи музыку"))
+        self.assertIsNone(music_play_query("включи экран"))
 
     def test_radio_query_ignores_songs(self):
         self.assertIsNone(radio_play_query("включи песню кино"))
+        self.assertIsNone(radio_play_query("Включи с YouTube хром или сказочный детектив"))
+        self.assertIsNone(radio_play_query("включи хром или сказочный детектив"))
+        self.assertIsNone(radio_play_query("включи маяк"))
         self.assertEqual(radio_play_query("включи радио рок-фм"), "рок-фм")
+        self.assertEqual(radio_play_query("включи радио маяк"), "маяк")
 
     def test_attach_music_play(self):
         def pick(query):
@@ -50,6 +66,19 @@ class YoutubeSearchTest(unittest.TestCase):
         self.assertEqual(got[0]["video_id"], "dQw4w9WgXcQ")
         self.assertIn("Rick", got[0]["title"])
         self.assertEqual(got[0]["url"], "yt://dQw4w9WgXcQ")
+
+    def test_resolve_tries_или_alternative(self):
+        seen = []
+
+        def search(query, _cfg):
+            seen.append(query)
+            if query == "сказочный детектив":
+                return [{"video_id": "tale01", "title": "Сказочный детектив", "url": "yt://tale01"}]
+            return []
+
+        picked = youtube.resolve_track("хром или сказочный детектив", search_fn=search)
+        self.assertEqual(seen, ["хром", "хрум", "сказочный детектив"])
+        self.assertEqual(picked["video_id"], "tale01")
 
     def test_resolve_uses_injected_search(self):
         def search(query, _cfg):

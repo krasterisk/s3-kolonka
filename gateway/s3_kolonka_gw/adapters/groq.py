@@ -13,6 +13,8 @@ from s3_kolonka_gw.device_ctrl import (
     attach_music_play,
     attach_radio_play,
     heuristic_commands,
+    music_play_query,
+    radio_play_query,
     spoken_ack,
 )
 from s3_kolonka_gw import radio
@@ -44,8 +46,9 @@ _SYSTEM = (
     "без списков и разметки. Одно-три предложения. "
     "Если просят громкость, яркость, выключить или включить колонку — "
     "вызови соответствующую функцию. "
-    "Если просят включить радио, станцию или жанр — вызови play_radio. "
-    "Если просят песню, исполнителя, клип или YouTube — вызови play_music. "
+    "play_radio вызывай только если в фразе есть слово «радио». "
+    "Иначе включить что-то (песню, мультфильм, «хрум», «сказочный детектив», "
+    "название через «или», «с youtube») — play_music, источник YouTube. "
     "Выключить радио или музыку — stop_radio. "
     "Не выдумывай названия станций, треков и URL. "
     "Если инструмент вернул ask — озвучь этот вопрос. "
@@ -489,6 +492,10 @@ class GroqBackend(VoiceBackend):
                 extra, vol, bl = apply_tool(name, args, vol, bl)
                 cmds.extend(extra)
                 tool_body = extra or {"ok": True}
+                if name == "play_radio" and radio_play_query(user_text) is None:
+                    name = "play_music"
+                    if not (args.get("query") or "").strip():
+                        args["query"] = music_play_query(user_text) or user_text
                 if name == "play_radio":
                     picked = self._pick_radio((args.get("query") or user_text or "").strip())
                     if picked and picked.get("url"):
