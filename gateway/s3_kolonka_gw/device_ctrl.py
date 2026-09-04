@@ -156,6 +156,48 @@ def heuristic_commands(text: str, vol: int, bl: int) -> list[dict]:
     return cmds
 
 
+_RADIO_STOP = re.compile(
+    r"выключи\s+радио|стоп\s+радио|останови\s+радио|выруби\s+радио"
+)
+_RADIO_PLAY = re.compile(
+    r"(?:включ(?:и|ить|ай)|поставь|играй|запусти)\s+радио(?:\s+(.+))?",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def radio_play_query(text: str) -> str | None:
+    t = (text or "").strip()
+    if not t:
+        return None
+    low = t.lower()
+    if _RADIO_STOP.search(low):
+        return None
+    m = _RADIO_PLAY.search(low)
+    if not m:
+        return None
+    return (m.group(1) or "").strip(" \t.!?,…")
+
+
+def attach_radio_play(cmds: list[dict], user_text: str, pick_fn) -> tuple[list[dict], str | None]:
+    cmds = list(cmds or [])
+    if any(c.get("name") == "radio_play" for c in cmds):
+        return cmds, None
+    query = radio_play_query(user_text)
+    if query is None:
+        return cmds, None
+    picked = pick_fn(query or user_text)
+    if not picked or not picked.get("url"):
+        return cmds, "Не нашла станцию."
+    cmds.append(
+        {
+            "name": "radio_play",
+            "url": picked["url"],
+            "title": picked.get("title") or picked.get("name") or "радио",
+        }
+    )
+    return cmds, None
+
+
 def spoken_ack(cmds: list[dict]) -> str:
     if not cmds:
         return ""

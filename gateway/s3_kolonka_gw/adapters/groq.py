@@ -7,7 +7,13 @@ import urllib.request
 from pathlib import Path
 
 from s3_kolonka_gw.adapters.base import VoiceBackend
-from s3_kolonka_gw.device_ctrl import TOOLS, apply_tool, heuristic_commands, spoken_ack
+from s3_kolonka_gw.device_ctrl import (
+    TOOLS,
+    apply_tool,
+    attach_radio_play,
+    heuristic_commands,
+    spoken_ack,
+)
 from s3_kolonka_gw import radio
 from s3_kolonka_gw.pcmutil import (
     audio_to_pcm16,
@@ -193,6 +199,9 @@ class GroqBackend(VoiceBackend):
             return
         if not cmds:
             cmds = heuristic_commands(user_text, self._vol, self._bl)
+        cmds, radio_err = attach_radio_play(cmds, user_text, self._pick_radio)
+        if radio_err:
+            reply = radio_err
         if cmds:
             await self._emit_cmds(cmds)
             if not reply:

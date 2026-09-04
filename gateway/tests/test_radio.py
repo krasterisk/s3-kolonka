@@ -122,6 +122,49 @@ class RadioHeuristicTest(unittest.TestCase):
         cmds = heuristic_commands("выключи радио", 50, 70)
         self.assertTrue(any(c.get("name") == "radio_stop" for c in cmds))
 
+    def test_play_radio_query_from_spoken_request(self):
+        from s3_kolonka_gw.device_ctrl import radio_play_query
+
+        self.assertEqual(radio_play_query("Включи радио европа плюс"), "европа плюс")
+        self.assertEqual(radio_play_query("включай радио европа плюс"), "европа плюс")
+        self.assertEqual(radio_play_query("поставь радио джаз"), "джаз")
+        self.assertEqual(radio_play_query("включи радио"), "")
+        self.assertIsNone(radio_play_query("выключи радио"))
+        self.assertIsNone(radio_play_query("включи экран"))
+        self.assertIsNone(radio_play_query("какая погода"))
+
+    def test_attach_radio_play_when_llm_only_talks(self):
+        from s3_kolonka_gw.device_ctrl import attach_radio_play
+
+        def pick(query):
+            self.assertEqual(query, "европа плюс")
+            return {
+                "url": "http://ep256.hostingradio.ru:8052/europaplus256.mp3",
+                "title": "Европа Плюс",
+                "uuid": "ok-mp3",
+            }
+
+        cmds, err = attach_radio_play([], "Включи радио европа плюс", pick)
+        self.assertIsNone(err)
+        self.assertEqual(cmds[0]["name"], "radio_play")
+        self.assertTrue(cmds[0]["url"].endswith(".mp3"))
+        self.assertEqual(cmds[0]["title"], "Европа Плюс")
+
+    def test_attach_radio_play_keeps_existing_cmd(self):
+        from s3_kolonka_gw.device_ctrl import attach_radio_play
+
+        existing = [{"name": "radio_play", "url": "http://already/", "title": "X"}]
+        cmds, err = attach_radio_play(existing, "Включи радио европа плюс", lambda q: self.fail("should not pick"))
+        self.assertEqual(cmds, existing)
+        self.assertIsNone(err)
+
+    def test_attach_radio_play_missing_station(self):
+        from s3_kolonka_gw.device_ctrl import attach_radio_play
+
+        cmds, err = attach_radio_play([], "включи радио ноунейм", lambda q: None)
+        self.assertEqual(cmds, [])
+        self.assertIn("станц", err.lower())
+
 
 if __name__ == "__main__":
     unittest.main()
