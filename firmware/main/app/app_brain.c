@@ -21,6 +21,7 @@
 
 #define BRAIN_HOST CONFIG_KOLONKA_BRAIN_HOST
 #define BRAIN_PORT CONFIG_KOLONKA_BRAIN_PORT
+#define UPLINK_CHUNK 640
 
 static const char *TAG = "brain";
 static esp_websocket_client_handle_t s_ws;
@@ -96,6 +97,29 @@ static void send_json(const char *json)
     if (n < 0) {
         ESP_LOGW(TAG, "send_text fail %d", n);
     }
+}
+
+static int send_uplink(const uint8_t *data, int n)
+{
+    if (!s_ws || !data || n <= 0) {
+        return -1;
+    }
+    int off = 0;
+    while (off < n) {
+        int take = n - off;
+        if (take > UPLINK_CHUNK) {
+            take = UPLINK_CHUNK;
+        }
+        int sent = esp_websocket_client_send_bin(
+            s_ws, (const char *)(data + off), take, pdMS_TO_TICKS(1500));
+        if (sent < 0) {
+            return sent;
+        }
+        off += take;
+        /* Yield so LWIP/Wi-Fi on core 0 can ACK; a tight send loop drops TCP. */
+        vTaskDelay(1);
+    }
+    return off;
 }
 
 static void flush_uplink(void)
@@ -373,8 +397,8 @@ static void brain_task(void *arg)
                 .port = BRAIN_PORT,
                 .path = "/",
                 .transport = WEBSOCKET_TRANSPORT_OVER_TCP,
-                .buffer_size = 2048,
-                .task_stack = 4096,
+                .buffer_size = 4096,
+                .task_stack = 6144,
                 .network_timeout_ms = 60000,
                 .reconnect_timeout_ms = 3000,
                 .disable_auto_reconnect = false,
@@ -452,7 +476,7 @@ static void brain_task(void *arg)
         if (!item) {
             continue;
         }
-        int sent = esp_websocket_client_send_bin(s_ws, (const char *)item, (int)n, pdMS_TO_TICKS(1500));
+        int sent = send_uplink(item, (int)n);
         if (sent < 0) {
             ESP_LOGW(TAG, "uplink send %d", sent);
             s_end_listen = true;
@@ -473,9 +497,9 @@ void app_brain_start(void)
         s_up_rb = xRingbufferCreate(16 * 1024, RINGBUF_TYPE_NOSPLIT);
     }
     app_audio_set_mic_sink(mic_sink);
-    /* Below afe_fetch (5) so Hey Jarvis can run while PCM radio plays. */
+    /* Both on core 1. Core 0 is Wi-Fi/LWIP; a listen send loop there drops TCP. */
     xTaskCreatePinnedToCore(play_task, "brain_play", 4096, NULL, 4, NULL, 1);
-    xTaskCreatePinnedToCore(brain_task, "brain", 4096, NULL, 4, NULL, 0);
+    xTaskCreatePinnedToCore(brain_task, "brain", 4096, NULL, 4, NULL, 1);
     ESP_LOGI(TAG, "brain ws://%s:%d", BRAIN_HOST, BRAIN_PORT);
 }
 
