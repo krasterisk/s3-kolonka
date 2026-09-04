@@ -53,13 +53,11 @@ def _which(names):
     return None
 
 
-def ffmpeg_radio_cmd(url, sample_rate=16000):
+def ffmpeg_radio_cmd(url, sample_rate=16000, ffmpeg=None):
     raw = (url or "").strip()
     if not raw.startswith("http://") and not raw.startswith("https://"):
         raise ValueError("bad radio url")
-    ffmpeg = _which(["ffmpeg"])
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg not found")
+    ffmpeg = ffmpeg or _which(["ffmpeg"]) or "ffmpeg"
     return [
         ffmpeg,
         "-nostdin",
