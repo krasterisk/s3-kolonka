@@ -10,8 +10,9 @@
 #define UI_COLOR_HEARD      0xC5D0DA
 #define UI_COLOR_ARC_TRACK  0x2A3340
 
-#define UI_NAV_TOP          30
-#define UI_CONTENT_TOP      84
+#define UI_NAV_TOP          28
+#define UI_CONTENT_TOP      76
+#define UI_DOTS_BOTTOM      16
 #define UI_LISTEN_SIZE      132
 #define UI_RESET_WIFI_W     120
 #define UI_RESET_WIFI_H     28

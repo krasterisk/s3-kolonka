@@ -7,14 +7,13 @@
 #include "app_audio.h"
 #include "app_brain.h"
 #include "app_wifi.h"
-#include "fonts.h"
 #include "ui_pages.h"
 #include "ui_theme.h"
 
 static lv_obj_t *s_tv;
 static lv_obj_t *s_tiles[3];
 static lv_obj_t *s_nav_icon[3];
-static lv_obj_t *s_nav_lab[3];
+static lv_obj_t *s_dots[3];
 static ui_page_t s_page = UI_PAGE_HOME;
 static bool s_shown_listen;
 static bool s_asleep;
@@ -25,12 +24,6 @@ static const char *s_nav_icons[] = {
     LV_SYMBOL_HOME,
     LV_SYMBOL_AUDIO,
     LV_SYMBOL_SETTINGS,
-};
-
-static const char *s_nav_labels[] = {
-    "дом",
-    "медиа",
-    "ещё",
 };
 
 static void style_tile(lv_obj_t *tile)
@@ -50,8 +43,9 @@ static void nav_set_active(ui_page_t page)
         if (s_nav_icon[i]) {
             lv_obj_set_style_text_color(s_nav_icon[i], c, 0);
         }
-        if (s_nav_lab[i]) {
-            lv_obj_set_style_text_color(s_nav_lab[i], c, 0);
+        if (s_dots[i]) {
+            lv_obj_set_style_bg_color(s_dots[i], c, 0);
+            lv_obj_set_style_bg_opa(s_dots[i], i == (int)page ? LV_OPA_COVER : LV_OPA_40, 0);
         }
     }
 }
@@ -183,7 +177,7 @@ void ui_handle_brightness(int percent)
 static void create_nav(lv_obj_t *scr)
 {
     lv_obj_t *bar = lv_obj_create(scr);
-    lv_obj_set_size(bar, 260, 52);
+    lv_obj_set_size(bar, 240, 44);
     lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, UI_NAV_TOP);
     lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(bar, 0, 0);
@@ -192,10 +186,10 @@ static void create_nav(lv_obj_t *scr)
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLL_CHAIN);
     lv_obj_move_foreground(bar);
 
-    static const int xoff[] = {-86, 0, 86};
+    static const int xoff[] = {-78, 0, 78};
     for (int i = 0; i < 3; i++) {
         lv_obj_t *btn = lv_obj_create(bar);
-        lv_obj_set_size(btn, 72, 52);
+        lv_obj_set_size(btn, 56, 44);
         lv_obj_align(btn, LV_ALIGN_CENTER, xoff[i], 0);
         lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(btn, 0, 0);
@@ -206,17 +200,41 @@ static void create_nav(lv_obj_t *scr)
 
         lv_obj_t *icon = lv_label_create(btn);
         lv_label_set_text(icon, s_nav_icons[i]);
+#if LV_FONT_MONTSERRAT_16
+        lv_obj_set_style_text_font(icon, &lv_font_montserrat_16, 0);
+#else
         lv_obj_set_style_text_font(icon, LV_FONT_DEFAULT, 0);
-        lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 2);
+#endif
+        lv_obj_center(icon);
         s_nav_icon[i] = icon;
-
-        lv_obj_t *lab = lv_label_create(btn);
-        lv_label_set_text(lab, s_nav_labels[i]);
-        lv_obj_set_style_text_font(lab, &font_ru_12, 0);
-        lv_obj_align(lab, LV_ALIGN_BOTTOM_MID, 0, -2);
-        s_nav_lab[i] = lab;
     }
-    nav_set_active(UI_PAGE_HOME);
+}
+
+static void create_dots(lv_obj_t *scr)
+{
+    lv_obj_t *row = lv_obj_create(scr);
+    lv_obj_set_size(row, 56, 14);
+    lv_obj_align(row, LV_ALIGN_BOTTOM_MID, 0, -UI_DOTS_BOTTOM);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_move_foreground(row);
+
+    static const int xoff[] = {-14, 0, 14};
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t *dot = lv_obj_create(row);
+        lv_obj_set_size(dot, 8, 8);
+        lv_obj_align(dot, LV_ALIGN_CENTER, xoff[i], 0);
+        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(dot, 0, 0);
+        lv_obj_set_style_bg_opa(dot, LV_OPA_40, 0);
+        lv_obj_set_style_bg_color(dot, lv_color_hex(UI_COLOR_MUTED), 0);
+        lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE);
+        s_dots[i] = dot;
+    }
 }
 
 void ui_show_home(void)
@@ -234,16 +252,18 @@ void ui_show_home(void)
     s_tiles[UI_PAGE_HOME] = lv_tileview_add_tile(s_tv, 0, 0, LV_DIR_RIGHT);
     style_tile(s_tiles[UI_PAGE_HOME]);
 
-    s_tiles[UI_PAGE_MEDIA] = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_NONE);
+    s_tiles[UI_PAGE_MEDIA] = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_HOR);
     style_tile(s_tiles[UI_PAGE_MEDIA]);
 
-    s_tiles[UI_PAGE_SETTINGS] = lv_tileview_add_tile(s_tv, 2, 0, LV_DIR_NONE);
+    s_tiles[UI_PAGE_SETTINGS] = lv_tileview_add_tile(s_tv, 2, 0, LV_DIR_LEFT);
     style_tile(s_tiles[UI_PAGE_SETTINGS]);
 
     ui_home_create(s_tiles[UI_PAGE_HOME]);
     ui_media_create(s_tiles[UI_PAGE_MEDIA]);
     ui_settings_create(s_tiles[UI_PAGE_SETTINGS]);
     create_nav(scr);
+    create_dots(scr);
+    nav_set_active(UI_PAGE_HOME);
 
     app_audio_set_wake_cb(ui_handle_wake);
     app_audio_set_standby(true);

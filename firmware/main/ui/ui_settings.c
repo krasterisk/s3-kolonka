@@ -66,6 +66,7 @@ void ui_settings_create(lv_obj_t *parent)
     lv_slider_set_value(s_vol, app_audio_get_volume(), LV_ANIM_OFF);
     lv_obj_align(s_vol, LV_ALIGN_CENTER, 0, 14);
     lv_obj_clear_flag(s_vol, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_clear_flag(s_vol, LV_OBJ_FLAG_SCROLL_CHAIN);
     lv_obj_add_event_cb(s_vol, on_vol, LV_EVENT_VALUE_CHANGED, NULL);
 
     lv_obj_t *bl_l = lv_label_create(parent);
@@ -80,11 +81,12 @@ void ui_settings_create(lv_obj_t *parent)
     lv_slider_set_value(s_bl, 70, LV_ANIM_OFF);
     lv_obj_align(s_bl, LV_ALIGN_CENTER, 0, 72);
     lv_obj_clear_flag(s_bl, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_clear_flag(s_bl, LV_OBJ_FLAG_SCROLL_CHAIN);
     lv_obj_add_event_cb(s_bl, on_bl, LV_EVENT_VALUE_CHANGED, NULL);
 
     lv_obj_t *forget = lv_btn_create(parent);
     lv_obj_set_size(forget, UI_RESET_WIFI_W, UI_RESET_WIFI_H);
-    lv_obj_align(forget, LV_ALIGN_BOTTOM_MID, 0, -18);
+    lv_obj_align(forget, LV_ALIGN_BOTTOM_MID, 0, -42);
     lv_obj_clear_flag(forget, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_add_event_cb(forget, on_forget, LV_EVENT_CLICKED, NULL);
     lv_obj_t *fl = lv_label_create(forget);

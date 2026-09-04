@@ -67,14 +67,15 @@ void ui_media_create(lv_obj_t *parent)
     lv_label_set_text(vol_l, "Громкость");
     lv_obj_set_style_text_color(vol_l, lv_color_hex(UI_COLOR_MUTED), 0);
     lv_obj_set_style_text_font(vol_l, &font_ru_12, 0);
-    lv_obj_align(vol_l, LV_ALIGN_BOTTOM_MID, 0, -72);
+    lv_obj_align(vol_l, LV_ALIGN_BOTTOM_MID, 0, -76);
 
     s_vol = lv_slider_create(parent);
     lv_obj_set_width(s_vol, UI_SLIDER_W);
     lv_slider_set_range(s_vol, 0, 100);
     lv_slider_set_value(s_vol, app_audio_get_volume(), LV_ANIM_OFF);
-    lv_obj_align(s_vol, LV_ALIGN_BOTTOM_MID, 0, -48);
+    lv_obj_align(s_vol, LV_ALIGN_BOTTOM_MID, 0, -52);
     lv_obj_clear_flag(s_vol, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_clear_flag(s_vol, LV_OBJ_FLAG_SCROLL_CHAIN);
     lv_obj_add_event_cb(s_vol, on_vol, LV_EVENT_VALUE_CHANGED, NULL);
 }
 

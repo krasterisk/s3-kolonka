@@ -61,7 +61,7 @@ idf.py -p <PORT> flash monitor
 
 On Windows the serial port is usually `COM3`. After flash:
 
-- Home: tap the center disc to listen; swipe right or use the top icons for Media / Settings
+- Home: tap the center disc to listen; swipe or use the top icons to move between Home / Media / Settings (dots at the bottom show the page)
 - If no Wi-Fi is stored, join **s3-kolonka** and open `http://192.168.4.1`
 - Settings → **Сброс Wi-Fi** (120×28) clears credentials and reboots
 - Tap Listen, speak, pause — the turn ends on silence
