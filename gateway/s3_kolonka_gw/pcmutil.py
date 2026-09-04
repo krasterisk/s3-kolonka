@@ -54,12 +54,17 @@ def _which(names):
 
 
 RADIO_FRAME_BYTES = 640  # 20 ms of PCM16 mono 16 kHz
+RADIO_MAX_LEAD_S = 0.16
 
 
 def pcm16_realtime_s(nbytes, sample_rate=16000):
     if sample_rate <= 0:
         return 0.0
     return float(nbytes) / float(sample_rate * 2)
+
+
+def radio_drop_for_live(sent_bytes, elapsed_s, max_lead_s=RADIO_MAX_LEAD_S, sample_rate=16000):
+    return pcm16_realtime_s(sent_bytes, sample_rate) - elapsed_s > max_lead_s
 
 
 def ffmpeg_radio_cmd(url, sample_rate=16000, ffmpeg=None):

@@ -21,10 +21,10 @@ from s3_kolonka_gw.pcmutil import (
     espeak_to_pcm16,
     ffmpeg_radio_cmd,
     mp3_to_pcm16,
-    pcm16_realtime_s,
     pcm16_rms,
     pcm16_to_wav,
     piper_to_pcm16,
+    radio_drop_for_live,
 )
 from s3_kolonka_gw.wake import match_wake
 
@@ -131,7 +131,13 @@ class GroqBackend(VoiceBackend):
             elif self._heard:
                 self._silence_ms += ms
         if self._heard and self._silence_ms >= _SILENCE_MS:
-            log.info("auto-stop silence %sms after %sms", self._silence_ms, self._listen_ms)
+            log.info(
+                "auto-stop silence %sms after %sms rms=%.0f bytes=%d",
+                self._silence_ms,
+                self._listen_ms,
+                pcm16_rms(bytes(self._buf)),
+                len(self._buf),
+            )
             await self.stop()
             return
         if self._listen_ms >= _MAX_LISTEN_MS:
@@ -197,8 +203,9 @@ class GroqBackend(VoiceBackend):
         )
         self._radio_proc = proc
         on_pcm = getattr(self, "_on_pcm", None)
-        started = asyncio.get_event_loop().time()
+        started = None
         sent = 0
+        dropped = 0
         try:
             while True:
                 data = await proc.stdout.read(RADIO_FRAME_BYTES)
@@ -206,17 +213,22 @@ class GroqBackend(VoiceBackend):
                     break
                 if self._pcm_epoch != self._gen:
                     break
+                now = asyncio.get_event_loop().time()
+                if started is None:
+                    started = now
+                if radio_drop_for_live(sent, now - started):
+                    dropped += 1
+                    continue
                 if on_pcm:
                     await on_pcm(data)
                 sent += len(data)
-                ahead = pcm16_realtime_s(sent) - (asyncio.get_event_loop().time() - started)
-                if ahead > 0.004:
-                    await asyncio.sleep(ahead)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             log.warning("radio stream failed: %s", exc)
         finally:
+            if dropped:
+                log.info("radio drop %s frames to stay live", dropped)
             await self._kill_radio()
 
     async def _finish_turn(self, pcm: bytes):
@@ -427,8 +439,12 @@ class GroqBackend(VoiceBackend):
                         "content": json.dumps(tool_body),
                     }
                 )
-            follow = self._complete(messages, use_tools=False)
-            message = follow["choices"][0]["message"]
+            try:
+                follow = self._complete(messages, use_tools=False)
+                message = follow["choices"][0]["message"]
+            except RuntimeError as exc:
+                log.warning("llm follow failed: %s", exc)
+                return spoken_ack(cmds), cmds
         reply = (message.get("content") or "").strip()
         if not reply:
             reply = (message.get("reasoning") or "").strip()

@@ -238,8 +238,7 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (ev->op_code == 1) {
             handle_text(ev->data_ptr, ev->data_len);
         } else if (ev->op_code == 2 && s_play_rb && s_accept_play) {
-            TickType_t wait = app_audio_is_radio() ? pdMS_TO_TICKS(40) : 0;
-            xRingbufferSend(s_play_rb, ev->data_ptr, (size_t)ev->data_len, wait);
+            xRingbufferSend(s_play_rb, ev->data_ptr, (size_t)ev->data_len, 0);
         }
         break;
     case WEBSOCKET_EVENT_ERROR:

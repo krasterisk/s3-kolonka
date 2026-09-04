@@ -1,7 +1,13 @@
 import struct
 import unittest
 
-from s3_kolonka_gw.pcmutil import RADIO_FRAME_BYTES, ffmpeg_radio_cmd, pcm16_realtime_s, pcm16_rms
+from s3_kolonka_gw.pcmutil import (
+    RADIO_FRAME_BYTES,
+    ffmpeg_radio_cmd,
+    pcm16_realtime_s,
+    pcm16_rms,
+    radio_drop_for_live,
+)
 
 
 class PcmRmsTest(unittest.TestCase):
@@ -36,6 +42,11 @@ class FfmpegRadioCmdTest(unittest.TestCase):
     def test_rejects_non_http_url(self):
         with self.assertRaises(ValueError):
             ffmpeg_radio_cmd("file:///tmp/x.mp3")
+
+    def test_drops_ffmpeg_burst_to_stay_live(self):
+        self.assertFalse(radio_drop_for_live(640, 0.01))
+        self.assertTrue(radio_drop_for_live(6400, 0.01))
+        self.assertFalse(radio_drop_for_live(6400, 0.25))
 
 
 if __name__ == "__main__":

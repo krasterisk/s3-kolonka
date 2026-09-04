@@ -32,7 +32,6 @@
 #define MIC_CHANNELS 4
 #define MIC_REF_CH 0
 #define MIC_L_CH 1
-#define MIC_R_CH 3
 #define MIC_UI_DIV 80
 #define MIC_UI_GATE 8
 
@@ -219,19 +218,14 @@ static void mic_task(void *arg)
             continue;
         }
 
-        /* RMNM: ch0 is DAC loopback, ch1/ch3 are mics. Mixing ch0 into the
-         * meter made the disc twitch in silence and fed radio into wake. */
+        /* RMNM: ch0 is DAC loopback, ch1 is the mic that STT already used.
+         * One-tap echo cancel only; a 128-tap NLMS starved this task and
+         * killed wake / truncated listen (gateway saw ~2.8 s then silence). */
         int16_t mono[160];
         int64_t acc = 0;
         for (int i = 0; i < frames; i++) {
             const int16_t *slot = &buf[MIC_CHANNELS * i];
-            int32_t mix = ((int32_t)slot[MIC_L_CH] + (int32_t)slot[MIC_R_CH]) / 2;
-            if (mix > 32767) {
-                mix = 32767;
-            } else if (mix < -32768) {
-                mix = -32768;
-            }
-            int16_t clean = aec_process((int16_t)mix, slot[MIC_REF_CH]);
+            int16_t clean = aec_process(slot[MIC_L_CH], slot[MIC_REF_CH]);
             mono[i] = clean;
             acc += (int32_t)clean * (int32_t)clean;
         }

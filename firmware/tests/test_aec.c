@@ -19,29 +19,29 @@ static float rms(const int16_t *x, int n)
 
 int main(void)
 {
-    const int n = 16000;
+    const int n = 8000;
     int16_t *ref = malloc((size_t)n * sizeof(int16_t));
-    int16_t *mic = malloc((size_t)n * sizeof(int16_t));
     int16_t *out = malloc((size_t)n * sizeof(int16_t));
-    if (!ref || !mic || !out) {
+    if (!ref || !out) {
         fprintf(stderr, "alloc failed\n");
         return 1;
     }
 
+    aec_reset();
+    double echo_in_acc = 0;
+    double echo_out_acc = 0;
     for (int i = 0; i < n; i++) {
         ref[i] = (int16_t)(12000.0 * sin(2.0 * M_PI * 440.0 * i / 16000.0));
-        int16_t echo = (i >= 6) ? (int16_t)(ref[i - 6] * 3 / 5) : 0;
-        int16_t voice = (int16_t)(4000.0 * sin(2.0 * M_PI * 220.0 * i / 16000.0));
-        mic[i] = (int16_t)(echo + voice);
+        int16_t echo = (int16_t)(ref[i] * 3 / 5);
+        int16_t y = aec_process(echo, ref[i]);
+        out[i] = y;
+        if (i >= 4000) {
+            echo_in_acc += (double)echo * (double)echo;
+            echo_out_acc += (double)y * (double)y;
+        }
     }
-
-    aec_reset();
-    for (int i = 0; i < n; i++) {
-        out[i] = aec_process(mic[i], ref[i]);
-    }
-
-    float echo_in = rms(mic + 12000, 4000);
-    float echo_out = rms(out + 12000, 4000);
+    float echo_in = (float)sqrt(echo_in_acc / 4000.0);
+    float echo_out = (float)sqrt(echo_out_acc / 4000.0);
     if (echo_out >= echo_in * 0.45f) {
         fprintf(stderr, "aec did not suppress echo: in=%.1f out=%.1f\n", echo_in, echo_out);
         return 1;
@@ -54,7 +54,7 @@ int main(void)
         int16_t voice = (int16_t)(5000.0 * sin(2.0 * M_PI * 220.0 * i / 16000.0));
         int16_t echo = (int16_t)(ref[i] * 2 / 3);
         int16_t y = aec_process((int16_t)(voice + echo), ref[i]);
-        if (i >= 12000) {
+        if (i >= 4000) {
             voice_acc += (double)voice * (double)voice;
             out_acc += (double)y * (double)y;
         }
