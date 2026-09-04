@@ -1,5 +1,7 @@
 import re
 
+from s3_kolonka_gw import radio
+
 TOOLS = [
     {
         "type": "function",
@@ -188,13 +190,7 @@ def attach_radio_play(cmds: list[dict], user_text: str, pick_fn) -> tuple[list[d
     picked = pick_fn(query or user_text)
     if not picked or not picked.get("url"):
         return cmds, "Не нашла станцию."
-    cmds.append(
-        {
-            "name": "radio_play",
-            "url": picked["url"],
-            "title": picked.get("title") or picked.get("name") or "радио",
-        }
-    )
+    cmds.append(radio.device_play_cmd(picked))
     return cmds, None
 
 

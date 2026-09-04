@@ -168,8 +168,11 @@ static void handle_text(const char *data, int len)
                 copy_utf8(s_reply, sizeof(s_reply), reply->valuestring);
             }
             if (strcmp(st, "live") == 0 || strcmp(st, "thinking") == 0 ||
-                strcmp(st, "error") == 0 || strcmp(st, "radio") == 0) {
+                strcmp(st, "error") == 0) {
                 request_abort_play();
+            } else if (strcmp(st, "radio") == 0) {
+                s_abort_play = false;
+                s_accept_play = true;
             } else if (strcmp(st, "speaking") == 0) {
                 s_accept_play = true;
                 app_audio_radio_stop();
@@ -281,7 +284,7 @@ static void play_task(void *arg)
         uint8_t *item = xRingbufferReceive(s_play_rb, &n, pdMS_TO_TICKS(50));
         if (!item) {
             idle_ms += 50;
-            if (idle_ms >= 400 && app_audio_is_playing()) {
+            if (idle_ms >= 400 && app_audio_is_playing() && !app_audio_is_radio()) {
                 app_audio_play_end();
             }
             continue;
@@ -471,6 +474,13 @@ bool app_brain_ready(void)
 void app_brain_set_wake_mode(bool on)
 {
     s_wake_mode = on;
+}
+
+void app_brain_radio_stop(void)
+{
+    request_abort_play();
+    app_audio_radio_stop();
+    send_json("{\"type\":\"radio_stop\"}");
 }
 
 bool app_brain_take_cmd(char *name, int name_len, int *value)

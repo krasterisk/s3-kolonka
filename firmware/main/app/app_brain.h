@@ -4,6 +4,7 @@
 
 void app_brain_start(void);
 void app_brain_set_listen(bool on);
+void app_brain_radio_stop(void);
 void app_brain_set_wake_mode(bool on);
 bool app_brain_ready(void);
 bool app_brain_take_cmd(char *name, int name_len, int *value);

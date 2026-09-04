@@ -18,6 +18,7 @@ from s3_kolonka_gw import radio
 from s3_kolonka_gw.pcmutil import (
     audio_to_pcm16,
     espeak_to_pcm16,
+    ffmpeg_radio_cmd,
     mp3_to_pcm16,
     pcm16_rms,
     pcm16_to_wav,
@@ -65,6 +66,7 @@ class GroqBackend(VoiceBackend):
         self._buf = bytearray()
         self._history = []
         self._turn_task = None
+        self._radio_proc = None
         self._gen = 0
         self._pcm_epoch = -1
         self._mode = "tap"
@@ -151,6 +153,8 @@ class GroqBackend(VoiceBackend):
             self._busy = False
 
     async def close(self):
+        self._pcm_epoch = -1
+        await self._kill_radio()
         task = self._turn_task
         if task and not task.done():
             task.cancel()
@@ -158,6 +162,54 @@ class GroqBackend(VoiceBackend):
                 await task
             except asyncio.CancelledError:
                 pass
+
+    async def stop_radio(self):
+        self._pcm_epoch = -1
+        await self._kill_radio()
+        await self.status("idle", "groq", reply="Радио выключено.")
+
+    async def _kill_radio(self):
+        proc = self._radio_proc
+        self._radio_proc = None
+        if not proc:
+            return
+        if proc.returncode is None:
+            proc.kill()
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+
+    async def _stream_radio(self, url: str):
+        try:
+            cmd = ffmpeg_radio_cmd(url)
+        except Exception as exc:
+            log.warning("radio ffmpeg cmd: %s", exc)
+            await self.status("error", "radio decode: %s" % exc)
+            return
+        log.info("radio ffmpeg %s", url)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        self._radio_proc = proc
+        on_pcm = getattr(self, "_on_pcm", None)
+        try:
+            while True:
+                data = await proc.stdout.read(_CHUNK)
+                if not data:
+                    break
+                if self._pcm_epoch != self._gen:
+                    break
+                if on_pcm:
+                    await on_pcm(data)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("radio stream failed: %s", exc)
+        finally:
+            await self._kill_radio()
 
     async def _finish_turn(self, pcm: bytes):
         if not self.api_key:
@@ -209,7 +261,10 @@ class GroqBackend(VoiceBackend):
         radio_cmd = next((c for c in cmds if c.get("name") == "radio_play"), None)
         if radio_cmd:
             title = radio_cmd.get("title") or "радио"
+            source = radio_cmd.get("source") or ""
+            self._arm_tts()
             await self.status("radio", title, heard=user_text, reply=title)
+            await self._stream_radio(source)
             return
         if any(c.get("name") == "radio_stop" for c in cmds):
             await self.status("idle", "groq", heard=user_text, reply=reply or "Радио выключено.")
@@ -352,13 +407,7 @@ class GroqBackend(VoiceBackend):
                 if name == "play_radio":
                     picked = self._pick_radio((args.get("query") or user_text or "").strip())
                     if picked:
-                        extra = [
-                            {
-                                "name": "radio_play",
-                                "url": picked["url"],
-                                "title": picked.get("title") or picked.get("name"),
-                            }
-                        ]
+                        extra = [radio.device_play_cmd(picked)]
                         cmds.extend(extra)
                         tool_body = {"ok": True, "title": extra[0]["title"], "uuid": picked["uuid"]}
                     else:

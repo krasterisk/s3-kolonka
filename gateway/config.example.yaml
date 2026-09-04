@@ -32,7 +32,7 @@ xiaozhi:
   url: ""
   token: ""
 
-# Open station directory. Streams play on the speaker, not through the VPS.
+# Open station directory. The gateway decodes MP3 Icecast to PCM16 for the speaker.
 radio:
   provider: radio-browser
   base_url: "https://de1.api.radio-browser.info"

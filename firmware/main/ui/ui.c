@@ -173,7 +173,7 @@ void ui_handle_listen_click(void)
 
 void ui_handle_radio_stop(void)
 {
-    app_audio_radio_stop();
+    app_brain_radio_stop();
     s_radio_title[0] = 0;
     ui_media_set_playing(false, NULL);
 }

@@ -162,6 +162,18 @@ class RadioPickerTest(unittest.TestCase):
         self.assertEqual(picked["uuid"], "ok-mp3")
         self.assertTrue(picked["url"].endswith(".mp3"))
 
+    def test_device_cmd_is_pcm_not_icecast(self):
+        cmd = radio.device_play_cmd(
+            {
+                "url": "http://silverrain.hostingradio.ru/silver128.mp3",
+                "title": "Серебряный дождь",
+            }
+        )
+        self.assertEqual(cmd["name"], "radio_play")
+        self.assertEqual(cmd["url"], "pcm://")
+        self.assertEqual(cmd["source"], "http://silverrain.hostingradio.ru/silver128.mp3")
+        self.assertEqual(cmd["title"], "Серебряный дождь")
+
 
 class RadioProbeTest(unittest.TestCase):
     def test_accepts_mpeg_sync_and_audio_type(self):
@@ -365,7 +377,8 @@ class RadioHeuristicTest(unittest.TestCase):
         cmds, err = attach_radio_play([], "Включи радио европа плюс", pick)
         self.assertIsNone(err)
         self.assertEqual(cmds[0]["name"], "radio_play")
-        self.assertTrue(cmds[0]["url"].endswith(".mp3"))
+        self.assertEqual(cmds[0]["url"], "pcm://")
+        self.assertEqual(cmds[0]["source"], "http://ep256.hostingradio.ru:8052/europaplus256.mp3")
         self.assertEqual(cmds[0]["title"], "Европа Плюс")
 
     def test_attach_radio_play_keeps_existing_cmd(self):

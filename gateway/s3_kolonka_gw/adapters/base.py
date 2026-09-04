@@ -23,6 +23,9 @@ class VoiceBackend:
     async def close(self) -> None:
         pass
 
+    async def stop_radio(self) -> None:
+        pass
+
     async def status(self, state: str, detail: str = "", heard: str = "", reply: str = "") -> None:
         cb: Optional[StatusFn] = getattr(self, "_on_status", None)
         if cb:

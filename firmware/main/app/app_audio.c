@@ -44,6 +44,7 @@ static app_audio_mic_sink_t s_mic_sink;
 static app_audio_wake_cb_t s_wake_cb;
 static bool s_mww;
 static volatile bool s_radio;
+static volatile bool s_radio_http;
 static esp_asp_handle_t s_radio_player;
 
 static void pa_on(void)
@@ -273,7 +274,7 @@ bool app_audio_is_playing(void)
 
 void app_audio_play_pcm16(const int16_t *stereo, int samples)
 {
-    if (s_radio) {
+    if (s_radio_http) {
         return;
     }
     if (!stereo || samples <= 0) {
@@ -359,6 +360,7 @@ static int radio_event_cb(esp_asp_event_pkt_t *event, void *ctx)
         memcpy(&st, event->payload, event->payload_size);
         ESP_LOGI(TAG, "radio state %s", esp_audio_simple_player_state_to_str(st));
         if (st == ESP_ASP_STATE_ERROR || st == ESP_ASP_STATE_FINISHED) {
+            s_radio_http = false;
             s_radio = false;
             if (!s_playing) {
                 pa_off();
@@ -449,6 +451,7 @@ void app_audio_radio_stop(void)
         }
     }
     s_radio = false;
+    s_radio_http = false;
     if (!s_playing) {
         pa_off();
     }
@@ -460,6 +463,15 @@ void app_audio_radio_stop(void)
 bool app_audio_radio_start(const char *url)
 {
     char uri[288];
+    if (url && strncmp(url, "pcm://", 6) == 0) {
+        app_audio_play_abort();
+        app_audio_radio_stop();
+        s_radio_http = false;
+        s_radio = true;
+        pa_on();
+        ESP_LOGI(TAG, "radio pcm");
+        return true;
+    }
     if (!radio_url_ok(url) || !s_radio_player) {
         ESP_LOGW(TAG, "radio reject url");
         return false;
@@ -467,6 +479,7 @@ bool app_audio_radio_start(const char *url)
     radio_uri_for_player(url, uri, sizeof(uri));
     app_audio_play_abort();
     app_audio_radio_stop();
+    s_radio_http = true;
     s_radio = true;
     pa_on();
     if (esp_audio_simple_player_run(s_radio_player, uri, NULL) != ESP_OK) {

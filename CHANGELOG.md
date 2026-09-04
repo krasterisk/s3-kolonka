@@ -20,6 +20,7 @@ and this project uses [Semantic Versioning](https://semver.org/) after 1.0.0.
 - «Включи радио …» starts a station even if the LLM only repeats the phrase
 - Gateway probes radio URLs and falls back to the next candidate instead of starting a dead stream
 - Radio play uses the URL after HTTP redirects so the speaker does not start an empty 301 body
+- Radio audio is decoded on the gateway and played as PCM16 on the speaker
 
 ## [0.1.0] - 2026-09-03
 

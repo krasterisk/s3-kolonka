@@ -53,6 +53,37 @@ def _which(names):
     return None
 
 
+def ffmpeg_radio_cmd(url, sample_rate=16000):
+    raw = (url or "").strip()
+    if not raw.startswith("http://") and not raw.startswith("https://"):
+        raise ValueError("bad radio url")
+    ffmpeg = _which(["ffmpeg"])
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found")
+    return [
+        ffmpeg,
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-reconnect",
+        "1",
+        "-reconnect_streamed",
+        "1",
+        "-reconnect_delay_max",
+        "2",
+        "-i",
+        raw,
+        "-ac",
+        "1",
+        "-ar",
+        str(sample_rate),
+        "-f",
+        "s16le",
+        "pipe:1",
+    ]
+
+
 def audio_to_pcm16(data: bytes, sample_rate: int = 16000, suffix: str = ".bin") -> bytes:
     ffmpeg = _which(["ffmpeg"])
     if not ffmpeg:

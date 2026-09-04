@@ -77,6 +77,8 @@ async def session(ws, path, cfg):
                 await backend.listen(mode=cmd.get("mode") or "tap")
             elif kind == "stop":
                 await backend.stop()
+            elif kind == "radio_stop":
+                await backend.stop_radio()
             else:
                 await on_status("error", "unknown type")
     except websockets.exceptions.ConnectionClosed as exc:

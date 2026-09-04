@@ -61,6 +61,19 @@ def search_url(cfg, query):
 _AUDIO_EXT = (".mp3", ".aac", ".wav", ".flac", ".m4a", ".amr", ".opus")
 
 
+PCM_URI = "pcm://"
+
+
+def device_play_cmd(picked):
+    picked = picked or {}
+    return {
+        "name": "radio_play",
+        "url": PCM_URI,
+        "source": (picked.get("url") or "").strip(),
+        "title": picked.get("title") or picked.get("name") or "радио",
+    }
+
+
 def player_uri(url):
     raw = (url or "").strip()
     if not raw:
