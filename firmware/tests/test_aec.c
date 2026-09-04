@@ -8,15 +8,6 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-static float rms(const int16_t *x, int n)
-{
-    double acc = 0;
-    for (int i = 0; i < n; i++) {
-        acc += (double)x[i] * (double)x[i];
-    }
-    return (float)sqrt(acc / (double)n);
-}
-
 int main(void)
 {
     const int n = 8000;
