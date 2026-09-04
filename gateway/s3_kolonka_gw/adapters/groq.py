@@ -16,10 +16,12 @@ from s3_kolonka_gw.device_ctrl import (
 )
 from s3_kolonka_gw import radio
 from s3_kolonka_gw.pcmutil import (
+    RADIO_FRAME_BYTES,
     audio_to_pcm16,
     espeak_to_pcm16,
     ffmpeg_radio_cmd,
     mp3_to_pcm16,
+    pcm16_realtime_s,
     pcm16_rms,
     pcm16_to_wav,
     piper_to_pcm16,
@@ -195,15 +197,21 @@ class GroqBackend(VoiceBackend):
         )
         self._radio_proc = proc
         on_pcm = getattr(self, "_on_pcm", None)
+        started = asyncio.get_event_loop().time()
+        sent = 0
         try:
             while True:
-                data = await proc.stdout.read(_CHUNK)
+                data = await proc.stdout.read(RADIO_FRAME_BYTES)
                 if not data:
                     break
                 if self._pcm_epoch != self._gen:
                     break
                 if on_pcm:
                     await on_pcm(data)
+                sent += len(data)
+                ahead = pcm16_realtime_s(sent) - (asyncio.get_event_loop().time() - started)
+                if ahead > 0.004:
+                    await asyncio.sleep(ahead)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

@@ -26,7 +26,7 @@ ends the turn (silence / max length).
 | `hello` | `backend`, `sample_rate` | Connection accepted. |
 | `status` | `state`, `detail`, optional `heard`, `reply` | UI state. `heard` is the recognized phrase, `reply` is the spoken answer. |
 | `cmd` | `name`, `value`, optional `url`, `title` | Device control: `volume`, `brightness`, `power_off`, `power_on`, `radio_play`, `radio_stop`. |
-| binary | PCM16 | TTS playback. Valid only after `status.state=speaking`. A new `listen` or `live`/`thinking`/`error`/`radio` aborts leftover audio. |
+| binary | PCM16 | TTS or radio PCM. Valid after `status.state=speaking` or `radio`. A new `listen` or `live`/`thinking`/`error` aborts leftover audio. |
 
 ### `status.state`
 

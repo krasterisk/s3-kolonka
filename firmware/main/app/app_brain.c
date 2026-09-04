@@ -238,7 +238,8 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (ev->op_code == 1) {
             handle_text(ev->data_ptr, ev->data_len);
         } else if (ev->op_code == 2 && s_play_rb && s_accept_play) {
-            xRingbufferSend(s_play_rb, ev->data_ptr, (size_t)ev->data_len, 0);
+            TickType_t wait = app_audio_is_radio() ? pdMS_TO_TICKS(40) : 0;
+            xRingbufferSend(s_play_rb, ev->data_ptr, (size_t)ev->data_len, wait);
         }
         break;
     case WEBSOCKET_EVENT_ERROR:
@@ -362,7 +363,7 @@ static void brain_task(void *arg)
                 .port = BRAIN_PORT,
                 .path = "/",
                 .transport = WEBSOCKET_TRANSPORT_OVER_TCP,
-                .buffer_size = 2048,
+                .buffer_size = 4096,
                 .network_timeout_ms = 60000,
                 .reconnect_timeout_ms = 3000,
                 .disable_auto_reconnect = false,

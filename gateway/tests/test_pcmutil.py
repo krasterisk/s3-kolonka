@@ -1,7 +1,7 @@
 import struct
 import unittest
 
-from s3_kolonka_gw.pcmutil import ffmpeg_radio_cmd, pcm16_rms
+from s3_kolonka_gw.pcmutil import RADIO_FRAME_BYTES, ffmpeg_radio_cmd, pcm16_realtime_s, pcm16_rms
 
 
 class PcmRmsTest(unittest.TestCase):
@@ -27,6 +27,11 @@ class FfmpegRadioCmdTest(unittest.TestCase):
         self.assertIn("1", cmd)
         self.assertEqual(cmd[-1], "pipe:1")
         self.assertIn("http://silverrain.hostingradio.ru/silver128.mp3", cmd)
+        self.assertIn("+nobuffer", cmd)
+        self.assertIn("low_delay", cmd)
+        self.assertIn("-vn", cmd)
+        self.assertEqual(RADIO_FRAME_BYTES, 640)
+        self.assertAlmostEqual(pcm16_realtime_s(640), 0.02)
 
     def test_rejects_non_http_url(self):
         with self.assertRaises(ValueError):

@@ -19,6 +19,7 @@
 #include "esp_gmf_rate_cvt.h"
 #define RADIO_HAS_CVT 1
 #endif
+#include "aec.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -29,6 +30,11 @@
 #define PA_GPIO GPIO_NUM_15
 #define SAMPLE_RATE 16000
 #define MIC_CHANNELS 4
+#define MIC_REF_CH 0
+#define MIC_L_CH 1
+#define MIC_R_CH 3
+#define MIC_UI_DIV 80
+#define MIC_UI_GATE 8
 
 static const char *TAG = "audio";
 static int s_volume = 50;
@@ -213,20 +219,32 @@ static void mic_task(void *arg)
             continue;
         }
 
+        /* RMNM: ch0 is DAC loopback, ch1/ch3 are mics. Mixing ch0 into the
+         * meter made the disc twitch in silence and fed radio into wake. */
         int16_t mono[160];
         int64_t acc = 0;
         for (int i = 0; i < frames; i++) {
-            int16_t a = buf[MIC_CHANNELS * i + 0];
-            int16_t b = buf[MIC_CHANNELS * i + 1];
-            acc += (int32_t)a * a + (int32_t)b * b;
-            int32_t mix = (int32_t)a + (int32_t)b;
-            mono[i] = (int16_t)(mix / 2);
+            const int16_t *slot = &buf[MIC_CHANNELS * i];
+            int32_t mix = ((int32_t)slot[MIC_L_CH] + (int32_t)slot[MIC_R_CH]) / 2;
+            if (mix > 32767) {
+                mix = 32767;
+            } else if (mix < -32768) {
+                mix = -32768;
+            }
+            int16_t clean = aec_process((int16_t)mix, slot[MIC_REF_CH]);
+            mono[i] = clean;
+            acc += (int32_t)clean * (int32_t)clean;
         }
-        int level = (int)(sqrtf((float)acc / (float)(frames * 2)) / 80.0f);
+        int level = (int)(sqrtf((float)acc / (float)frames) / (float)MIC_UI_DIV);
+        if (level < MIC_UI_GATE) {
+            level = 0;
+        } else {
+            level -= MIC_UI_GATE;
+        }
         if (level > 100) {
             level = 100;
         }
-        s_mic_level = level;
+        s_mic_level = (s_mic_level * 2 + level) / 3;
 
         if (s_listen && !s_playing) {
             s_listen_samples += frames;
@@ -252,7 +270,7 @@ static void mic_task(void *arg)
             s_mic_sink(mono, frames);
         }
 
-        if (s_mww && !s_listen && s_standby && (!s_playing || s_radio)) {
+        if (s_mww && !s_listen && s_standby) {
             if (mww_feed(mono, frames)) {
                 if (s_wake_cb) {
                     s_wake_cb();
@@ -499,6 +517,7 @@ bool app_audio_is_radio(void)
 
 void app_audio_start(void)
 {
+    aec_reset();
     gpio_reset_pin(PA_GPIO);
     gpio_set_direction(PA_GPIO, GPIO_MODE_OUTPUT);
     pa_off();

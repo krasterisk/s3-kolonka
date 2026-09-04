@@ -53,6 +53,15 @@ def _which(names):
     return None
 
 
+RADIO_FRAME_BYTES = 640  # 20 ms of PCM16 mono 16 kHz
+
+
+def pcm16_realtime_s(nbytes, sample_rate=16000):
+    if sample_rate <= 0:
+        return 0.0
+    return float(nbytes) / float(sample_rate * 2)
+
+
 def ffmpeg_radio_cmd(url, sample_rate=16000, ffmpeg=None):
     raw = (url or "").strip()
     if not raw.startswith("http://") and not raw.startswith("https://"):
@@ -64,6 +73,10 @@ def ffmpeg_radio_cmd(url, sample_rate=16000, ffmpeg=None):
         "-hide_banner",
         "-loglevel",
         "error",
+        "-fflags",
+        "+nobuffer",
+        "-flags",
+        "low_delay",
         "-reconnect",
         "1",
         "-reconnect_streamed",
@@ -72,6 +85,7 @@ def ffmpeg_radio_cmd(url, sample_rate=16000, ffmpeg=None):
         "2",
         "-i",
         raw,
+        "-vn",
         "-ac",
         "1",
         "-ar",
