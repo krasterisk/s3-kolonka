@@ -23,6 +23,7 @@ and this project uses [Semantic Versioning](https://semver.org/) after 1.0.0.
 - Radio audio is decoded on the gateway and played as PCM16 on the speaker
 - Speaker echo uses ESP-SR AFE AEC only (no WakeNet); Hey Jarvis still runs after AEC. Falls back to the one-tap canceller if AFE fails to start
 - Factory app partition is 4M so the AFE library fits on the 16MB flash
+- Home dialog text is cleared when a new listen starts, on idle, and when radio starts or stops
 
 ## [0.1.0] - 2026-09-03
 

@@ -40,6 +40,7 @@ ends the turn (silence / max length).
 | `radio` | Playing Icecast MP3; `reply` is the station title |
 
 `thinking`, `speaking`, `idle`, `radio`, and `error` end the listen UI on the device.
+`live`, `idle`, and `radio` clear leftover Home `heard` / `reply` text. The station title is shown on Media only.
 
 `radio_play` must be HTTP(S) MP3 Icecast. HLS / m3u8 is rejected. Radio and TTS never share the DAC. The gateway probes each candidate, follows HTTP redirects, then decodes the Icecast stream to PCM16 mono 16 kHz and sends it as binary frames. `radio_play` uses `url=pcm://` so the speaker does not open Icecast itself. A device `radio_stop` text frame stops the relay. If no station works, the device is not started and the user hears that no station was found.
 

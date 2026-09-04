@@ -158,14 +158,17 @@ static void handle_text(const char *data, int len)
             }
             const cJSON *heard = cJSON_GetObjectItem(root, "heard");
             const cJSON *reply = cJSON_GetObjectItem(root, "reply");
-            if (strcmp(st, "live") == 0) {
+            /* live / idle / radio: drop leftover dialog. Station title lives on Media. */
+            if (strcmp(st, "live") == 0 || strcmp(st, "idle") == 0 ||
+                strcmp(st, "radio") == 0) {
                 clear_turn_text();
-            }
-            if (cJSON_IsString(heard) && heard->valuestring) {
-                copy_utf8(s_heard, sizeof(s_heard), heard->valuestring);
-            }
-            if (cJSON_IsString(reply) && reply->valuestring) {
-                copy_utf8(s_reply, sizeof(s_reply), reply->valuestring);
+            } else {
+                if (cJSON_IsString(heard) && heard->valuestring) {
+                    copy_utf8(s_heard, sizeof(s_heard), heard->valuestring);
+                }
+                if (cJSON_IsString(reply) && reply->valuestring) {
+                    copy_utf8(s_reply, sizeof(s_reply), reply->valuestring);
+                }
             }
             if (strcmp(st, "live") == 0 || strcmp(st, "thinking") == 0 ||
                 strcmp(st, "error") == 0) {
@@ -209,6 +212,10 @@ static void handle_text(const char *data, int len)
                 }
                 if (cJSON_IsString(title) && title->valuestring) {
                     copy_utf8(s_cmd_title, sizeof(s_cmd_title), title->valuestring);
+                }
+                if (strcmp(s_cmd_name, "radio_play") == 0 ||
+                    strcmp(s_cmd_name, "radio_stop") == 0) {
+                    clear_turn_text();
                 }
                 s_cmd_ready = true;
             }
@@ -467,6 +474,9 @@ void app_brain_start(void)
 
 void app_brain_set_listen(bool on)
 {
+    if (on) {
+        clear_turn_text();
+    }
     s_listen = on;
 }
 
@@ -484,6 +494,7 @@ void app_brain_radio_stop(void)
 {
     request_abort_play();
     app_audio_radio_stop();
+    clear_turn_text();
     send_json("{\"type\":\"radio_stop\"}");
 }
 

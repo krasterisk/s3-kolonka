@@ -318,8 +318,9 @@ void ui_tick(void)
                 if (title && title[0]) {
                     strncpy(s_radio_title, title, sizeof(s_radio_title) - 1);
                     s_radio_title[sizeof(s_radio_title) - 1] = 0;
-                    ui_home_set_reply(s_radio_title);
                 }
+                ui_home_set_heard("");
+                ui_home_set_reply("");
                 ui_media_set_playing(true, s_radio_title[0] ? s_radio_title : title);
                 ui_go_page(UI_PAGE_MEDIA);
             }
