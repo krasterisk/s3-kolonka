@@ -242,18 +242,7 @@ static void handle_mono(const int16_t *mono, int frames, bool do_wake)
 
     if (s_listen && !s_radio) {
         s_listen_samples += frames;
-        if (s_listen_samples > SAMPLE_RATE * 4 / 10) {
-            if (level >= 12) {
-                s_speech_seen = true;
-                s_silence_samples = 0;
-            } else if (s_speech_seen) {
-                s_silence_samples += frames;
-                if (s_silence_samples >= SAMPLE_RATE * 12 / 10) {
-                    s_listen = false;
-                    s_mic_level = 0;
-                }
-            }
-        }
+        /* Do not cut on a short pause — the gateway VAD ends the turn. */
         if (s_listen_samples >= SAMPLE_RATE * 12) {
             s_listen = false;
             s_mic_level = 0;
@@ -346,6 +335,10 @@ static void afe_feed_task(void *arg)
                 wake_mono[i] = buf[ch * i + MIC_L_CH];
             }
             maybe_wake(wake_mono, samples);
+            if (s_listen) {
+                /* STT uses raw mic; AFE after radio/TTS gates the voice as echo. */
+                handle_mono(wake_mono, samples, false);
+            }
         }
     }
 }
@@ -369,7 +362,9 @@ static void afe_fetch_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
-        handle_mono(mono, n, false);
+        if (!(s_listen && !s_radio)) {
+            handle_mono(mono, n, false);
+        }
         if (s_playing || s_radio) {
             maybe_wake(mono, n);
         }

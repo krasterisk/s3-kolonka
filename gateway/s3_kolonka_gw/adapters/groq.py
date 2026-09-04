@@ -40,7 +40,7 @@ _MAX_BYTES = 16000 * 2 * 12
 _CHUNK = 3200
 _SPEECH_RMS = 400.0
 _GRACE_MS = 800
-_SILENCE_MS = 1200
+_SILENCE_MS = 2500
 _MAX_LISTEN_MS = 12000
 _SYSTEM = (
     "Ты голосовой ассистент умной колонки. Отвечай кратко, по-русски, "

@@ -50,5 +50,5 @@ A tap Listen still processes speech without a wake word.
 ## Timing (Groq adapter)
 
 - Ignore the first ~800 ms (button beep)
-- After speech, ~1.2 s of silence ends the turn
+- After speech, ~2.5 s of silence ends the turn
 - Hard cap ~12 s
