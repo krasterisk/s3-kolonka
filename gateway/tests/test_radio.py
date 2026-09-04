@@ -1,7 +1,41 @@
 import json
 import unittest
+import urllib.error
+from io import BytesIO
 
 from s3_kolonka_gw import radio
+
+
+class _FakeResp:
+    def __init__(self, body, ctype="audio/mpeg", extra=None):
+        self.body = body
+        self.headers = {"Content-Type": ctype}
+        if extra:
+            self.headers.update(extra)
+
+    def read(self, n=-1):
+        return self.body if n < 0 else self.body[:n]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class _FakeOpener:
+    def __init__(self, routes=None, error=None):
+        self.routes = routes or {}
+        self.error = error
+
+    def open(self, req, timeout=None):
+        url = getattr(req, "full_url", "") or str(req)
+        if self.error:
+            raise urllib.error.HTTPError(url, self.error, "err", None, BytesIO(b""))
+        for key, resp in self.routes.items():
+            if key == "" or key in url:
+                return resp
+        raise urllib.error.URLError("no route for %s" % url)
 
 
 SAMPLE = [
@@ -118,9 +152,123 @@ class RadioPickerTest(unittest.TestCase):
             self.assertEqual(query, "европа плюс")
             return json.dumps({"uuid": cands[0]["uuid"], "title": cands[0]["name"]})
 
-        picked = radio.resolve_station("европа плюс", cfg, search_fn=search, picker_fn=picker)
+        picked = radio.resolve_station(
+            "европа плюс", cfg, search_fn=search, picker_fn=picker, probe_fn=lambda u: True
+        )
         self.assertEqual(picked["uuid"], "ok-mp3")
         self.assertTrue(picked["url"].endswith(".mp3"))
+
+
+class RadioProbeTest(unittest.TestCase):
+    def test_accepts_mpeg_sync_and_audio_type(self):
+        mpeg = bytes.fromhex("fffbe04000000b00") + b"\x00" * 32
+        self.assertTrue(radio.looks_like_mp3(mpeg, "audio/mpeg"))
+        self.assertTrue(radio.looks_like_mp3(b"ID3" + b"\x00" * 20, "application/octet-stream"))
+        self.assertFalse(radio.looks_like_mp3(b"<!DOCTYPE html>", "text/html"))
+        self.assertFalse(radio.looks_like_mp3(b"", "text/html"))
+
+    def test_probe_stream_uses_opener(self):
+        mpeg = bytes.fromhex("fffbe040") + b"\x00" * 16
+        cfg = radio.normalize_config({})
+        self.assertTrue(
+            radio.probe_stream(
+                "http://ok.example/live.mp3",
+                cfg,
+                opener=_FakeOpener({"": _FakeResp(mpeg)}),
+            )
+        )
+
+    def test_probe_rejects_http_error_and_html(self):
+        cfg = radio.normalize_config({})
+        self.assertFalse(
+            radio.probe_stream(
+                "http://dead.example/gone.mp3",
+                cfg,
+                opener=_FakeOpener(error=404),
+            )
+        )
+        self.assertFalse(
+            radio.probe_stream(
+                "http://dead.example/page",
+                cfg,
+                opener=_FakeOpener({"": _FakeResp(b"<!DOCTYPE html>", "text/html")}),
+            )
+        )
+
+    def test_probe_accepts_icecast_headers_without_mpeg_sync(self):
+        cfg = radio.normalize_config({})
+        self.assertTrue(
+            radio.probe_stream(
+                "http://ok.example/live",
+                cfg,
+                opener=_FakeOpener(
+                    {
+                        "": _FakeResp(
+                            b"\x00" * 32,
+                            "application/octet-stream",
+                            extra={"icy-name": "Europa Plus", "icy-metaint": "16000"},
+                        )
+                    }
+                ),
+            )
+        )
+
+    def test_resolve_skips_dead_url_and_uses_next(self):
+        cfg = radio.normalize_config({})
+
+        def search(query, _cfg):
+            return SAMPLE
+
+        def picker(query, cands):
+            return json.dumps({"uuid": "ok-mp3", "title": "dead first"})
+
+        dead = "http://ep256.hostingradio.ru:8052/europaplus256.mp3"
+        live = "http://ep128.streamr.ru/"
+
+        def probe(url):
+            return live in url
+
+        picked = radio.resolve_station(
+            "европа плюс", cfg, search_fn=search, picker_fn=picker, probe_fn=probe
+        )
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked["uuid"], "unknown-br")
+        self.assertIn("streamr", picked["url"])
+
+    def test_resolve_default_probe_skips_html_then_uses_live(self):
+        cfg = radio.normalize_config({})
+        mpeg = bytes.fromhex("fffbe040") + b"\x00" * 16
+        opener = _FakeOpener(
+            {
+                "europaplus256": _FakeResp(b"<!DOCTYPE html>", "text/html"),
+                "streamr": _FakeResp(mpeg, "audio/mpeg"),
+            }
+        )
+        picked = radio.resolve_station(
+            "европа плюс",
+            cfg,
+            search_fn=lambda q, c: SAMPLE,
+            picker_fn=lambda q, c: json.dumps({"uuid": "ok-mp3", "title": "dead first"}),
+            opener=opener,
+        )
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked["uuid"], "unknown-br")
+        self.assertIn("streamr", picked["url"])
+
+    def test_resolve_none_when_all_dead(self):
+        cfg = radio.normalize_config({})
+
+        def search(query, _cfg):
+            return SAMPLE
+
+        picked = radio.resolve_station(
+            "европа плюс",
+            cfg,
+            search_fn=search,
+            picker_fn=lambda q, c: json.dumps({"uuid": c[0]["uuid"], "title": "x"}),
+            probe_fn=lambda u: False,
+        )
+        self.assertIsNone(picked)
 
     def test_search_url_uses_yaml_base(self):
         cfg = radio.normalize_config({"base_url": "https://nl1.api.radio-browser.info"})

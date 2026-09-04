@@ -18,6 +18,7 @@ and this project uses [Semantic Versioning](https://semver.org/) after 1.0.0.
 - Gateway host and port are Kconfig options (not a hardcoded public IP)
 - Round UI is split into Home / Media / Settings instead of one crowded screen
 - «Включи радио …» starts a station even if the LLM only repeats the phrase
+- Gateway probes radio URLs and falls back to the next candidate instead of starting a dead stream
 
 ## [0.1.0] - 2026-09-03
 

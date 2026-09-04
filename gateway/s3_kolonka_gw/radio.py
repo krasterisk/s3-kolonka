@@ -1,5 +1,6 @@
 import json
 import logging
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -161,7 +162,84 @@ def resolve_click(uuid, cfg, opener=None):
     return url or None
 
 
-def resolve_station(query, cfg, search_fn=None, picker_fn=None, opener=None):
+def looks_like_mp3(body, content_type=""):
+    ctype = (content_type or "").split(";", 1)[0].strip().lower()
+    if ctype in ("text/html", "text/plain", "application/json", "application/xml"):
+        return False
+    data = body or b""
+    if data.startswith(b"ID3"):
+        return True
+    window = data[:64]
+    for i in range(0, max(0, len(window) - 1)):
+        if window[i] == 0xFF and (window[i + 1] & 0xE0) == 0xE0:
+            return True
+    if ctype.startswith("audio/"):
+        return True
+    return False
+
+
+def probe_stream(url, cfg, opener=None, timeout=8):
+    cfg = normalize_config(cfg)
+    raw = (url or "").split("#", 1)[0].strip()
+    if not raw:
+        return False
+    req = urllib.request.Request(
+        raw,
+        headers={
+            "User-Agent": cfg["user_agent"],
+            "Accept": "*/*",
+            "Icy-MetaData": "0",
+        },
+        method="GET",
+    )
+    handle = opener or urllib.request.build_opener()
+    try:
+        with handle.open(req, timeout=timeout) as resp:
+            status = getattr(resp, "status", 200)
+            if status >= 400:
+                log.warning("radio probe HTTP %s %s", status, raw)
+                return False
+            headers = getattr(resp, "headers", None)
+            ctype = _header(headers, "Content-Type")
+            body = resp.read(2048)
+    except urllib.error.HTTPError as exc:
+        log.warning("radio probe HTTP %s %s", exc.code, raw)
+        return False
+    except Exception as exc:
+        log.warning("radio probe fail %s: %s", raw, exc)
+        return False
+    if _icy_alive(headers):
+        return True
+    ok = looks_like_mp3(body, ctype)
+    if not ok:
+        log.warning("radio probe not mp3 %s ctype=%s", raw, ctype)
+    return ok
+
+
+def _header(headers, name):
+    if headers is None:
+        return ""
+    getter = getattr(headers, "get", None)
+    if getter is None:
+        return ""
+    return (
+        getter(name)
+        or getter(name.lower())
+        or getter(name.title())
+        or ""
+    )
+
+
+def _icy_alive(headers):
+    return bool(
+        _header(headers, "icy-name")
+        or _header(headers, "icy-metaint")
+        or _header(headers, "icy-br")
+        or _header(headers, "ice-audio-info")
+    )
+
+
+def resolve_station(query, cfg, search_fn=None, picker_fn=None, opener=None, probe_fn=None):
     cfg = normalize_config(cfg)
     if search_fn:
         raw = search_fn(query, cfg)
@@ -173,13 +251,31 @@ def resolve_station(query, cfg, search_fn=None, picker_fn=None, opener=None):
     if picker_fn:
         picked = parse_picker_reply(picker_fn(query, cands), cands)
     else:
-        picked = cands[0]
-        picked = dict(picked)
+        picked = dict(cands[0])
         picked["title"] = picked.get("name")
     if not picked:
         return None
-    clicked = resolve_click(picked["uuid"], cfg, opener=opener) if search_fn is None else None
-    if clicked:
-        picked["url"] = clicked
-    picked["url"] = player_uri(picked.get("url") or "")
-    return picked
+    ordered = [picked] + [c for c in cands if c["uuid"] != picked["uuid"]]
+    probe = probe_fn if probe_fn is not None else (lambda u: probe_stream(u, cfg, opener=opener))
+    for cand in ordered:
+        url = cand.get("url") or ""
+        if search_fn is None:
+            clicked = resolve_click(cand["uuid"], cfg, opener=opener)
+            if clicked:
+                url = clicked
+        url = player_uri(url)
+        if not url:
+            continue
+        if not probe(url):
+            log.warning("radio skip dead %s %s", cand.get("name"), url)
+            continue
+        out = dict(cand)
+        out["url"] = url
+        if cand["uuid"] == picked["uuid"]:
+            out["title"] = picked.get("title") or out.get("name")
+        else:
+            out["title"] = out.get("name") or picked.get("title")
+            log.info("radio fallback %s -> %s", picked.get("name"), out["title"])
+        log.info("radio use %s %s", out.get("title"), url)
+        return out
+    return None
