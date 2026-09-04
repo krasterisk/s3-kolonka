@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from pathlib import Path
 
 import websockets
@@ -12,6 +13,35 @@ import yaml
 from s3_kolonka_gw.adapters import create_backend
 
 log = logging.getLogger("gw")
+
+_ORPHAN_SEC = 15
+_ORPHAN_MIN = 16000
+_orphans = {}
+
+
+def peer_host(ws):
+    addr = getattr(ws, "remote_address", None)
+    if not addr:
+        return ""
+    return addr[0]
+
+
+def stash_listen_orphan(store, host, pcm, mode, now=None):
+    now = time.time() if now is None else now
+    if not host or len(pcm or b"") < _ORPHAN_MIN:
+        return False
+    store[host] = {"pcm": bytes(pcm), "mode": mode or "tap", "ts": now}
+    return True
+
+
+def pop_listen_orphan(store, host, now=None):
+    now = time.time() if now is None else now
+    row = store.pop(host, None) if host else None
+    if not row:
+        return None
+    if now - float(row.get("ts") or 0) > _ORPHAN_SEC:
+        return None
+    return row
 
 
 def status_payload(state: str, detail: str = "", heard: str = "", reply: str = "") -> dict:
@@ -28,8 +58,26 @@ def load_config(path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
+async def _resume_orphan(backend, row):
+    pcm = row.get("pcm") or b""
+    mode = row.get("mode") or "tap"
+    log.info("resume orphan bytes=%s mode=%s", len(pcm), mode)
+    await backend.listen(mode)
+    backend._buf.clear()
+    backend._buf.extend(pcm)
+    backend._heard = True
+    await backend.stop()
+    task = getattr(backend, "_turn_task", None)
+    if task:
+        try:
+            await task
+        except asyncio.CancelledError:
+            raise
+
+
 async def session(ws, path, cfg):
     peer = ws.remote_address
+    host = peer_host(ws)
     backend = create_backend(cfg)
     log.info("client %s backend=%s", peer, backend.name)
 
@@ -59,6 +107,9 @@ async def session(ws, path, cfg):
     backend._on_cmd = on_cmd
     await ws.send(json.dumps({"type": "hello", "backend": backend.name, "sample_rate": 16000}))
     await on_status("idle", backend.name)
+    orphan = pop_listen_orphan(_orphans, host)
+    if orphan:
+        await _resume_orphan(backend, orphan)
 
     try:
         async for msg in ws:
@@ -82,7 +133,15 @@ async def session(ws, path, cfg):
             else:
                 await on_status("error", "unknown type")
     except websockets.exceptions.ConnectionClosed as exc:
-        log.info("client %s disconnected: %s", peer, exc)
+        snap = backend.listen_pcm_snapshot()
+        log.info(
+            "client %s disconnected: %s listen_bytes=%s",
+            peer,
+            exc,
+            len(snap),
+        )
+        if stash_listen_orphan(_orphans, host, snap, getattr(backend, "_mode", "tap")):
+            log.info("orphan listen bytes=%s host=%s", len(snap), host)
     finally:
         await backend.close()
         log.info("client %s closed", peer)

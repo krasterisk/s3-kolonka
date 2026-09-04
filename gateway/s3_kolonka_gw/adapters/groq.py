@@ -155,6 +155,11 @@ class GroqBackend(VoiceBackend):
             log.info("auto-stop max listen %sms heard=%s", self._listen_ms, self._heard)
             await self.stop()
 
+    def listen_pcm_snapshot(self) -> bytes:
+        if not self._listening or self._busy:
+            return b""
+        return bytes(self._buf)
+
     async def stop(self):
         if self._busy:
             return

@@ -20,6 +20,9 @@ class VoiceBackend:
     async def stop(self) -> None:
         raise NotImplementedError
 
+    def listen_pcm_snapshot(self) -> bytes:
+        return b""
+
     async def close(self) -> None:
         pass
 

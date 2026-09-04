@@ -31,6 +31,7 @@ and this project uses [Semantic Versioning](https://semver.org/) after 1.0.0.
 - Radio catalog lookups no longer block the WebSocket loop; a successful name hit skips extra genre requests
 - Voice can play a YouTube / YouTube Music track: the gateway searches, yt-dlp extracts audio, ffmpeg sends PCM like radio
 - YouTube play starts only after a file is cached; unavailable IDs are skipped for the next search hit
+- If the speaker drops mid-listen, the gateway keeps the clip and finishes the turn on reconnect
 
 ## [0.1.0] - 2026-09-03
 
