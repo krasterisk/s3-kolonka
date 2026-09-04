@@ -28,6 +28,7 @@ and this project uses [Semantic Versioning](https://semver.org/) after 1.0.0.
 - Setup portal skips AFE/MWW/brain and serves the Wi-Fi page from PSRAM so `192.168.4.1` is not an `oom` error
 - Hey Jarvis uses raw mic in silence and AFE-cleaned audio during radio; the play task yields to wake; radio lowers the detect cutoff
 - Radio search uses name, aliases, and genre tags; if there is no exact station it plays a close match or asks to clarify
+- Radio catalog lookups no longer block the WebSocket loop; a successful name hit skips extra genre requests
 
 ## [0.1.0] - 2026-09-03
 
