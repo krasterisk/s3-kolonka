@@ -13,7 +13,7 @@ Do not bind **8123**, **1900**, or **5353** (Home Assistant / discovery).
 | `type` | Meaning |
 | --- | --- |
 | `hello` | Optional greet. Body may include `device`. |
-| `listen` | Start capturing a turn. |
+| `listen` | Start a turn. Optional `mode`: `tap` (process any speech) or `wake` (require wake word). |
 | `stop` | End the turn and run STT → LLM → TTS. |
 
 After `listen`, the speaker streams binary PCM until `stop` or the gateway
@@ -24,8 +24,9 @@ ends the turn (silence / max length).
 | `type` | Fields | Meaning |
 | --- | --- | --- |
 | `hello` | `backend`, `sample_rate` | Connection accepted. |
-| `status` | `state`, `detail` | UI state. |
-| binary | PCM16 | TTS playback. |
+| `status` | `state`, `detail`, optional `heard`, `reply` | UI state. `heard` is the recognized phrase, `reply` is the spoken answer. |
+| `cmd` | `name`, `value` | Device control: `volume`, `brightness`, `power_off`, `power_on`. |
+| binary | PCM16 | TTS playback. Valid only after `status.state=speaking`. A new `listen` or `live`/`thinking`/`error` aborts leftover audio. |
 
 ### `status.state`
 
@@ -38,6 +39,9 @@ ends the turn (silence / max length).
 | `error` | Failed turn |
 
 `thinking`, `speaking`, `idle`, and `error` end the listen UI on the device.
+
+Wake words (when `mode=wake`): «колонка», «слушай», «kolonka», «проснись».
+A tap Listen still processes speech without a wake word.
 
 ## Timing (Groq adapter)
 

@@ -1,7 +1,7 @@
 from typing import Awaitable, Callable, Optional
 
 PcmFn = Callable[[bytes], Awaitable[None]]
-StatusFn = Callable[[str, str], Awaitable[None]]
+StatusFn = Callable[..., Awaitable[None]]
 
 
 class VoiceBackend:
@@ -14,7 +14,7 @@ class VoiceBackend:
     async def send_pcm(self, data: bytes) -> None:
         raise NotImplementedError
 
-    async def listen(self) -> None:
+    async def listen(self, mode: str = "tap") -> None:
         raise NotImplementedError
 
     async def stop(self) -> None:
@@ -23,7 +23,7 @@ class VoiceBackend:
     async def close(self) -> None:
         pass
 
-    async def status(self, state: str, detail: str = "") -> None:
+    async def status(self, state: str, detail: str = "", heard: str = "", reply: str = "") -> None:
         cb: Optional[StatusFn] = getattr(self, "_on_status", None)
         if cb:
-            await cb(state, detail)
+            await cb(state, detail, heard, reply)

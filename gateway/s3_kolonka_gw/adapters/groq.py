@@ -7,6 +7,7 @@ import urllib.request
 from pathlib import Path
 
 from s3_kolonka_gw.adapters.base import VoiceBackend
+from s3_kolonka_gw.device_ctrl import TOOLS, apply_tool, heuristic_commands, spoken_ack
 from s3_kolonka_gw.pcmutil import (
     audio_to_pcm16,
     espeak_to_pcm16,
@@ -15,19 +16,22 @@ from s3_kolonka_gw.pcmutil import (
     pcm16_to_wav,
     piper_to_pcm16,
 )
+from s3_kolonka_gw.wake import match_wake
 
 log = logging.getLogger("gw.groq")
 
 GROQ_BASE = "https://api.groq.com/openai/v1"
 _MAX_BYTES = 16000 * 2 * 12
-_CHUNK = 640
+_CHUNK = 3200
 _SPEECH_RMS = 400.0
 _GRACE_MS = 800
 _SILENCE_MS = 1200
 _MAX_LISTEN_MS = 12000
 _SYSTEM = (
     "Ты голосовой ассистент умной колонки. Отвечай кратко, по-русски, "
-    "без списков и разметки. Одно-три предложения."
+    "без списков и разметки. Одно-три предложения. "
+    "Если просят громкость, яркость, выключить или включить колонку — "
+    "вызови соответствующую функцию."
 )
 
 
@@ -50,6 +54,11 @@ class GroqBackend(VoiceBackend):
         self._buf = bytearray()
         self._history = []
         self._turn_task = None
+        self._gen = 0
+        self._pcm_epoch = -1
+        self._mode = "tap"
+        self._vol = 50
+        self._bl = 70
         self._reset_vad()
 
     def _reset_vad(self):
@@ -63,16 +72,30 @@ class GroqBackend(VoiceBackend):
         else:
             self._opener = urllib.request.build_opener()
 
-    async def listen(self):
+    async def start(self, on_pcm, on_status):
+        async def gated(data):
+            if self._pcm_epoch != self._gen:
+                return
+            await on_pcm(data)
+
+        await super().start(gated, on_status)
+
+    def _arm_tts(self):
+        self._pcm_epoch = self._gen
+
+    async def listen(self, mode="tap"):
         if not self.api_key:
             await self.status("error", "groq: no api_key")
             return
+        self._gen += 1
+        self._pcm_epoch = -1
         await self.close()
+        self._mode = mode if mode in ("wake", "tap") else "tap"
         self._listening = True
         self._busy = False
         self._buf.clear()
         self._reset_vad()
-        log.info("listen")
+        log.info("listen mode=%s gen=%s", self._mode, self._gen)
         await self.status("live", "groq")
 
     async def send_pcm(self, data: bytes):
@@ -146,37 +169,79 @@ class GroqBackend(VoiceBackend):
             return
         log.info("stt: %s", text[:120])
 
-        await self.status("thinking", "groq llm")
+        woke, rest = match_wake(text)
+        if self._mode == "wake" and not woke:
+            log.info("ignore no wake: %s", text[:80])
+            await self.status("idle", "no wake")
+            return
+        user_text = rest if woke else text
+        if woke and not user_text:
+            await self._speak("Слушаю.", heard=text)
+            return
+
+        await self.status("thinking", "groq llm", heard=user_text)
         try:
-            reply = await loop.run_in_executor(None, self._chat, text)
+            reply, cmds = await loop.run_in_executor(None, self._chat, user_text)
         except Exception as exc:
             log.exception("llm")
             await self.status("error", "groq llm: %s" % exc)
             return
+        if not cmds:
+            cmds = heuristic_commands(user_text, self._vol, self._bl)
+        if cmds:
+            await self._emit_cmds(cmds)
+            if not reply:
+                reply = spoken_ack(cmds)
         if not reply:
             await self.status("idle", "groq: empty llm")
             return
         log.info("llm: %s", reply[:120])
 
-        await self.status("speaking", "groq tts")
+        await self._speak(reply, heard=user_text)
+
+    async def _speak(self, reply: str, heard: str = ""):
+        self._arm_tts()
+        await self.status("speaking", "groq tts", heard=heard, reply=reply)
         try:
             audio = await self._tts(reply)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             log.exception("tts")
             await self.status("error", "groq tts: %s" % exc)
+            return
+        if self._pcm_epoch != self._gen:
             return
 
         on_pcm = getattr(self, "_on_pcm", None)
         if on_pcm and audio:
             try:
                 for i in range(0, len(audio), _CHUNK):
+                    if self._pcm_epoch != self._gen:
+                        return
                     await on_pcm(audio[i : i + _CHUNK])
-                    await asyncio.sleep(0.018)
+                    await asyncio.sleep(0.07)
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 log.warning("tts send failed: %s", exc)
                 await self.status("error", "tts send failed")
                 return
+        if self._pcm_epoch != self._gen:
+            return
         await self.status("idle", "groq")
+
+    async def _emit_cmds(self, cmds):
+        cb = getattr(self, "_on_cmd", None)
+        for cmd in cmds:
+            name = cmd.get("name")
+            if name == "volume":
+                self._vol = int(cmd.get("value") or self._vol)
+            elif name == "brightness":
+                self._bl = int(cmd.get("value") or self._bl)
+            if cb:
+                await cb(name, cmd.get("value"))
+            log.info("cmd %s %s", name, cmd.get("value"))
 
     def _headers(self, extra=None):
         headers = {
@@ -215,36 +280,67 @@ class GroqBackend(VoiceBackend):
             raise RuntimeError("stt HTTP %s %s" % (exc.code, exc.read().decode("utf-8", "replace")[:160])) from exc
         return (payload.get("text") or "").strip()
 
-    def _chat(self, user_text: str) -> str:
-        messages = [{"role": "system", "content": _SYSTEM}]
-        messages.extend(self._history[-8:])
-        messages.append({"role": "user", "content": user_text})
-        body = json.dumps(
-            {
-                "model": self.llm_model,
-                "messages": messages,
-                "temperature": 0.6,
-                "max_tokens": 400,
-            }
-        ).encode("utf-8")
+    def _complete(self, messages, use_tools=True):
+        payload = {
+            "model": self.llm_model,
+            "messages": messages,
+            "temperature": 0.6,
+            "max_tokens": 400,
+        }
+        if use_tools:
+            payload["tools"] = TOOLS
+            payload["tool_choice"] = "auto"
         req = urllib.request.Request(
             GROQ_BASE + "/chat/completions",
-            data=body,
+            data=json.dumps(payload).encode("utf-8"),
             headers=self._headers({"Content-Type": "application/json"}),
             method="POST",
         )
         try:
             with self._opener.open(req, timeout=60) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
+                return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            raise RuntimeError("llm HTTP %s %s" % (exc.code, exc.read().decode("utf-8", "replace")[:160])) from exc
+            body = exc.read().decode("utf-8", "replace")[:200]
+            if use_tools and exc.code in (400, 404, 422):
+                log.warning("llm tools unsupported: %s %s", exc.code, body)
+                return self._complete(messages, use_tools=False)
+            raise RuntimeError("llm HTTP %s %s" % (exc.code, body)) from exc
+
+    def _chat(self, user_text: str):
+        messages = [{"role": "system", "content": _SYSTEM}]
+        messages.extend(self._history[-8:])
+        messages.append({"role": "user", "content": user_text})
+        payload = self._complete(messages, use_tools=True)
         message = payload["choices"][0]["message"]
+        cmds = []
+        vol, bl = self._vol, self._bl
+        tool_calls = message.get("tool_calls") or []
+        if tool_calls:
+            messages.append(message)
+            for call in tool_calls:
+                fn = (call.get("function") or {})
+                name = fn.get("name") or ""
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                extra, vol, bl = apply_tool(name, args, vol, bl)
+                cmds.extend(extra)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.get("id") or name,
+                        "content": json.dumps(extra or {"ok": True}),
+                    }
+                )
+            follow = self._complete(messages, use_tools=False)
+            message = follow["choices"][0]["message"]
         reply = (message.get("content") or "").strip()
         if not reply:
             reply = (message.get("reasoning") or "").strip()
         self._history.append({"role": "user", "content": user_text})
-        self._history.append({"role": "assistant", "content": reply})
-        return reply
+        self._history.append({"role": "assistant", "content": reply or spoken_ack(cmds)})
+        return reply, cmds
 
     def _tts_groq(self, text: str) -> bytes:
         body = json.dumps(

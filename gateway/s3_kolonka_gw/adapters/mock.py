@@ -16,7 +16,7 @@ class MockBackend(VoiceBackend):
         self._listening = False
         self._buf = bytearray()
 
-    async def listen(self):
+    async def listen(self, mode="tap"):
         self._listening = True
         self._buf.clear()
         log.info("listen")

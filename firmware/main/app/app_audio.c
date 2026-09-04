@@ -15,6 +15,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "mww.h"
 
 #define PA_GPIO GPIO_NUM_15
 #define SAMPLE_RATE 16000
@@ -23,13 +24,16 @@
 static const char *TAG = "audio";
 static int s_volume = 50;
 static volatile bool s_listen;
+static volatile bool s_standby = true;
 static volatile bool s_playing;
 static volatile int s_mic_level;
-static volatile int s_listen_frames;
-static volatile int s_silence_frames;
+static volatile int s_listen_samples;
+static volatile int s_silence_samples;
 static volatile bool s_speech_seen;
 static SemaphoreHandle_t s_i2s;
 static app_audio_mic_sink_t s_mic_sink;
+static app_audio_wake_cb_t s_wake_cb;
+static bool s_mww;
 
 static void pa_on(void)
 {
@@ -146,12 +150,29 @@ int app_audio_mic_level(void)
 void app_audio_set_listen(bool on)
 {
     s_listen = on;
-    s_listen_frames = 0;
-    s_silence_frames = 0;
+    s_listen_samples = 0;
+    s_silence_samples = 0;
     s_speech_seen = false;
     if (!on) {
         s_mic_level = 0;
+        if (s_mww) {
+            mww_reset();
+        }
     }
+}
+
+void app_audio_set_standby(bool on)
+{
+    s_standby = on;
+}
+
+void app_audio_set_wake_cb(app_audio_wake_cb_t cb)
+{
+    s_wake_cb = cb;
+}
+
+void app_audio_flush_preroll(void)
+{
 }
 
 static void mic_task(void *arg)
@@ -170,7 +191,7 @@ static void mic_task(void *arg)
     }
 
     while (1) {
-        if (!s_listen) {
+        if (!s_listen && !s_standby) {
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
@@ -180,47 +201,51 @@ static void mic_task(void *arg)
             continue;
         }
 
+        int16_t mono[160];
         int64_t acc = 0;
-        int n = frames * 2;
         for (int i = 0; i < frames; i++) {
             int16_t a = buf[MIC_CHANNELS * i + 0];
             int16_t b = buf[MIC_CHANNELS * i + 1];
             acc += (int32_t)a * a + (int32_t)b * b;
+            int32_t mix = (int32_t)a + (int32_t)b;
+            mono[i] = (int16_t)(mix / 2);
         }
-        float rms = sqrtf((float)acc / (float)n);
-        int level = (int)(rms / 80.0f);
+        int level = (int)(sqrtf((float)acc / (float)(frames * 2)) / 80.0f);
         if (level > 100) {
             level = 100;
         }
         s_mic_level = level;
 
-        if (!s_playing) {
-            s_listen_frames++;
-            if (s_listen_frames > 40) {
-                if (level >= 16) {
+        if (s_listen && !s_playing) {
+            s_listen_samples += frames;
+            if (s_listen_samples > SAMPLE_RATE * 4 / 10) {
+                if (level >= 12) {
                     s_speech_seen = true;
-                    s_silence_frames = 0;
+                    s_silence_samples = 0;
                 } else if (s_speech_seen) {
-                    s_silence_frames++;
-                    if (s_silence_frames >= 120) {
+                    s_silence_samples += frames;
+                    if (s_silence_samples >= SAMPLE_RATE * 12 / 10) {
                         s_listen = false;
                         s_mic_level = 0;
                     }
                 }
             }
-            if (s_listen_frames >= 1200) {
+            if (s_listen_samples >= SAMPLE_RATE * 12) {
                 s_listen = false;
                 s_mic_level = 0;
             }
         }
 
         if (s_mic_sink && !s_playing && s_listen) {
-            int16_t mono[160];
-            for (int i = 0; i < frames; i++) {
-                int32_t mix = (int32_t)buf[MIC_CHANNELS * i + 0] + (int32_t)buf[MIC_CHANNELS * i + 1];
-                mono[i] = (int16_t)(mix / 2);
-            }
             s_mic_sink(mono, frames);
+        }
+
+        if (s_mww && !s_listen && s_standby && !s_playing) {
+            if (mww_feed(mono, frames)) {
+                if (s_wake_cb) {
+                    s_wake_cb();
+                }
+            }
         }
     }
 }
@@ -263,6 +288,26 @@ void app_audio_play_end(void)
         write_silence(40);
         pa_off();
         s_playing = false;
+        if (s_mww) {
+            mww_reset();
+        }
+    }
+    if (s_i2s) {
+        xSemaphoreGive(s_i2s);
+    }
+}
+
+void app_audio_play_abort(void)
+{
+    if (s_i2s) {
+        xSemaphoreTake(s_i2s, portMAX_DELAY);
+    }
+    if (s_playing) {
+        pa_off();
+        s_playing = false;
+        if (s_mww) {
+            mww_reset();
+        }
     }
     if (s_i2s) {
         xSemaphoreGive(s_i2s);
@@ -277,7 +322,11 @@ void app_audio_start(void)
     s_i2s = xSemaphoreCreateMutex();
 
     app_audio_set_volume(s_volume);
-    xTaskCreatePinnedToCore(mic_task, "mic", 4096, NULL, 4, NULL, 1);
     app_audio_chime();
-    ESP_LOGI(TAG, "audio ready, volume=%d", s_volume);
+    s_mww = mww_start();
+    if (!s_mww) {
+        ESP_LOGW(TAG, "mww off, tap listen only");
+    }
+    xTaskCreatePinnedToCore(mic_task, "mic", 8192, NULL, 4, NULL, 1);
+    ESP_LOGI(TAG, "audio ready, volume=%d wake=%s", s_volume, s_mww ? "hey-jarvis" : "no");
 }

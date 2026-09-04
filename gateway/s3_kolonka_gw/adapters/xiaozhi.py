@@ -8,7 +8,7 @@ class XiaozhiBackend(VoiceBackend):
         self.url = url
         self.token = token
 
-    async def listen(self):
+    async def listen(self, mode="tap"):
         await self.status("error", "xiaozhi: adapter not wired yet")
 
     async def stop(self):

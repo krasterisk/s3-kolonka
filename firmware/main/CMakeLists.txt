@@ -2,9 +2,12 @@ idf_component_register(
                          SRCS 
                               "./main.c"
                               "./ui/ui.c"
+                              "./ui/fonts/font_ru_12.c"
+                              "./ui/fonts/font_ru_14.c"
                               "./app/app_audio.c"
                               "./app/app_wifi.c"
-                              "./app/app_brain.c" 
+                              "./app/app_brain.c"
+                              "./mww/mww.cc" 
                               "./EXIO/TCA9554PWR.c"
                               "./LCD_Driver/esp_lcd_st77916/esp_lcd_st77916.c" 
                               "./LCD_Driver/ST77916.c"
@@ -33,7 +36,9 @@ idf_component_register(
                               "./BAT_Driver"
                               "./Wireless"
                               "./ui"
+                              "./ui/fonts"
                               "./app"
+                              "./mww"
                               "."
                          EMBED_FILES
                               "app/logo.png"

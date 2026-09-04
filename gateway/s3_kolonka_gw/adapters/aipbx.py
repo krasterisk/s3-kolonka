@@ -9,7 +9,7 @@ class AipbxBackend(VoiceBackend):
         self.assistant_id = assistant_id
         self.token = token
 
-    async def listen(self):
+    async def listen(self, mode="tap"):
         await self.status("error", "aipbx: adapter not wired yet")
 
     async def stop(self):

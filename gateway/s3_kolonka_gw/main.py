@@ -14,6 +14,15 @@ from s3_kolonka_gw.adapters import create_backend
 log = logging.getLogger("gw")
 
 
+def status_payload(state: str, detail: str = "", heard: str = "", reply: str = "") -> dict:
+    msg = {"type": "status", "state": state, "detail": detail}
+    if heard:
+        msg["heard"] = heard
+    if reply:
+        msg["reply"] = reply
+    return msg
+
+
 def load_config(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
@@ -27,13 +36,23 @@ async def session(ws, path, cfg):
     async def on_pcm(data: bytes):
         await ws.send(data)
 
-    async def on_status(state: str, detail: str = ""):
+    async def on_status(state: str, detail: str = "", heard: str = "", reply: str = ""):
         try:
-            await ws.send(json.dumps({"type": "status", "state": state, "detail": detail}))
+            await ws.send(json.dumps(status_payload(state, detail, heard, reply)))
         except Exception as exc:
             log.warning("status send failed: %s", exc)
 
+    async def on_cmd(name, value=None):
+        payload = {"type": "cmd", "name": name}
+        if value is not None:
+            payload["value"] = value
+        try:
+            await ws.send(json.dumps(payload))
+        except Exception as exc:
+            log.warning("cmd send failed: %s", exc)
+
     await backend.start(on_pcm, on_status)
+    backend._on_cmd = on_cmd
     await ws.send(json.dumps({"type": "hello", "backend": backend.name, "sample_rate": 16000}))
     await on_status("idle", backend.name)
 
@@ -51,7 +70,7 @@ async def session(ws, path, cfg):
             if kind == "hello":
                 await ws.send(json.dumps({"type": "hello", "backend": backend.name, "sample_rate": 16000}))
             elif kind == "listen":
-                await backend.listen()
+                await backend.listen(mode=cmd.get("mode") or "tap")
             elif kind == "stop":
                 await backend.stop()
             else:

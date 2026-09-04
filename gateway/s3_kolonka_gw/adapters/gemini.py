@@ -14,7 +14,7 @@ class GeminiBackend(VoiceBackend):
         self.api_key = (api_key or "").strip()
         self.model = model or "gemini-live-2.5-flash-native-audio"
 
-    async def listen(self):
+    async def listen(self, mode="tap"):
         if not self.api_key:
             log.warning("no api_key")
             await self.status("error", "gemini: no api_key")
