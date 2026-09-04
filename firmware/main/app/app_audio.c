@@ -241,7 +241,7 @@ static void mic_task(void *arg)
         }
         s_mic_level = (s_mic_level * 2 + level) / 3;
 
-        if (s_listen && !s_playing) {
+        if (s_listen && !s_radio) {
             s_listen_samples += frames;
             if (s_listen_samples > SAMPLE_RATE * 4 / 10) {
                 if (level >= 12) {
@@ -261,12 +261,11 @@ static void mic_task(void *arg)
             }
         }
 
-        if (s_mic_sink && !s_playing && s_listen) {
+        if (s_mic_sink && s_listen && !s_radio) {
             s_mic_sink(mono, frames);
         }
 
         if (s_mww && !s_listen && s_standby) {
-            mww_set_noisy(s_radio || s_playing);
             if (mww_feed(mono, frames)) {
                 if (s_wake_cb) {
                     s_wake_cb();
@@ -546,6 +545,8 @@ void app_audio_start(void)
     }
     /* Core 0: mic + wake. Core 1: play. Same-core play at prio 5 starved MWW
      * during radio, so Hey Jarvis died and stayed dead after stop. */
-    xTaskCreatePinnedToCore(mic_task, "mic", 8192, NULL, 5, NULL, 0);
+    /* Core 0 with Wi‑Fi: keep prio below the radio play task on core 1, but
+     * not so high that TFLite starves the station. */
+    xTaskCreatePinnedToCore(mic_task, "mic", 8192, NULL, 4, NULL, 0);
     ESP_LOGI(TAG, "audio ready, volume=%d wake=%s", s_volume, s_mww ? "hey-jarvis" : "no");
 }
