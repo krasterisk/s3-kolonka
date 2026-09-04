@@ -136,11 +136,8 @@ void ui_handle_wake(void)
     if (app_audio_is_listening() || !app_brain_ready()) {
         return;
     }
-    if (app_audio_is_playing() && !app_audio_is_radio()) {
-        return;
-    }
-    if (app_audio_is_radio()) {
-        app_audio_radio_stop();
+    if (app_audio_is_radio() || app_audio_is_playing()) {
+        app_brain_radio_stop();
     }
     if (s_asleep) {
         ui_set_asleep(false);

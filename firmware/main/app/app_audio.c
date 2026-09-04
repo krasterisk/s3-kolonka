@@ -218,14 +218,15 @@ static void mic_task(void *arg)
             continue;
         }
 
-        /* RMNM: ch0 is DAC loopback, ch1 is the mic that STT already used.
-         * One-tap echo cancel only; a 128-tap NLMS starved this task and
-         * killed wake / truncated listen (gateway saw ~2.8 s then silence). */
+        /* RMNM: ch0 is DAC loopback, ch1 is the mic. Cancel echo only while
+         * the speaker is up so standby wake sees clean mic samples. */
+        bool cancel = s_playing || s_radio;
         int16_t mono[160];
         int64_t acc = 0;
         for (int i = 0; i < frames; i++) {
             const int16_t *slot = &buf[MIC_CHANNELS * i];
-            int16_t clean = aec_process(slot[MIC_L_CH], slot[MIC_REF_CH]);
+            int16_t clean = cancel ? aec_process(slot[MIC_L_CH], slot[MIC_REF_CH])
+                                   : slot[MIC_L_CH];
             mono[i] = clean;
             acc += (int32_t)clean * (int32_t)clean;
         }
@@ -315,6 +316,7 @@ void app_audio_play_end(void)
         write_silence(40);
         pa_off();
         s_playing = false;
+        aec_reset();
         if (s_mww) {
             mww_reset();
         }
@@ -332,6 +334,7 @@ void app_audio_play_abort(void)
     if (s_playing) {
         pa_off();
         s_playing = false;
+        aec_reset();
         if (s_mww) {
             mww_reset();
         }
@@ -464,11 +467,9 @@ void app_audio_radio_stop(void)
     }
     s_radio = false;
     s_radio_http = false;
+    aec_reset();
     if (!s_playing) {
         pa_off();
-    }
-    if (s_mww) {
-        mww_reset();
     }
 }
 
@@ -542,6 +543,8 @@ void app_audio_start(void)
     if (!s_mww) {
         ESP_LOGW(TAG, "mww off, tap listen only");
     }
-    xTaskCreatePinnedToCore(mic_task, "mic", 8192, NULL, 4, NULL, 1);
+    /* Core 0: mic + wake. Core 1: play. Same-core play at prio 5 starved MWW
+     * during radio, so Hey Jarvis died and stayed dead after stop. */
+    xTaskCreatePinnedToCore(mic_task, "mic", 8192, NULL, 5, NULL, 0);
     ESP_LOGI(TAG, "audio ready, volume=%d wake=%s", s_volume, s_mww ? "hey-jarvis" : "no");
 }

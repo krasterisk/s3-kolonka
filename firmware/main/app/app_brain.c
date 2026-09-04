@@ -178,6 +178,10 @@ static void handle_text(const char *data, int len)
                 app_audio_radio_stop();
             } else if (strcmp(st, "idle") == 0) {
                 s_accept_play = false;
+                if (app_audio_is_radio()) {
+                    s_abort_play = true;
+                }
+                app_audio_radio_stop();
             }
             if (strcmp(st, "thinking") == 0 || strcmp(st, "speaking") == 0 ||
                 strcmp(st, "error") == 0 || strcmp(st, "radio") == 0) {

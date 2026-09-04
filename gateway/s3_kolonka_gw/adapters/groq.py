@@ -172,6 +172,7 @@ class GroqBackend(VoiceBackend):
                 pass
 
     async def stop_radio(self):
+        log.info("radio stop")
         self._pcm_epoch = -1
         await self._kill_radio()
         await self.status("idle", "groq", reply="Радио выключено.")
@@ -284,7 +285,10 @@ class GroqBackend(VoiceBackend):
             source = radio_cmd.get("source") or ""
             self._arm_tts()
             await self.status("radio", title, heard=user_text, reply=title)
+            stream_gen = self._gen
             await self._stream_radio(source)
+            if self._gen == stream_gen:
+                await self.status("idle", "groq")
             return
         if any(c.get("name") == "radio_stop" for c in cmds):
             await self.status("idle", "groq", heard=user_text, reply=reply or "Радио выключено.")
