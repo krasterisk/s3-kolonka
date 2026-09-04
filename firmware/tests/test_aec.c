@@ -26,7 +26,7 @@ int main(void)
     double echo_out_acc = 0;
     for (int i = 0; i < n; i++) {
         int16_t echo = (int16_t)(ref[i] * 3 / 5);
-        int16_t y = aec_process(echo, ref[i]);
+        int16_t y = aec_cancel(echo, ref[i]);
         if (i >= 4000) {
             echo_in_acc += (double)echo * (double)echo;
             echo_out_acc += (double)y * (double)y;
@@ -45,7 +45,7 @@ int main(void)
     for (int i = 0; i < n; i++) {
         int16_t voice = (int16_t)(5000.0 * sin(2.0 * M_PI * 220.0 * i / 16000.0));
         int16_t echo = (int16_t)(ref[i] * 2 / 3);
-        int16_t y = aec_process((int16_t)(voice + echo), ref[i]);
+        int16_t y = aec_cancel((int16_t)(voice + echo), ref[i]);
         if (i >= 4000) {
             voice_acc += (double)voice * (double)voice;
             out_acc += (double)y * (double)y;

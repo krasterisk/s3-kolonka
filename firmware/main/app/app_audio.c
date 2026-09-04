@@ -276,7 +276,7 @@ static void raw_mic_task(void *arg)
         bool cancel = s_playing || s_radio;
         for (int i = 0; i < frames; i++) {
             const int16_t *slot = &buf[MIC_CHANNELS * i];
-            mono[i] = cancel ? aec_process(slot[MIC_L_CH], slot[MIC_REF_CH]) : slot[MIC_L_CH];
+            mono[i] = cancel ? aec_cancel(slot[MIC_L_CH], slot[MIC_REF_CH]) : slot[MIC_L_CH];
         }
         handle_mono(mono, frames);
     }

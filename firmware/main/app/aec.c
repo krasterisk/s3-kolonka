@@ -10,7 +10,7 @@ void aec_reset(void)
     s_g = 0;
 }
 
-int16_t aec_process(int16_t mic, int16_t ref)
+int16_t aec_cancel(int16_t mic, int16_t ref)
 {
     int32_t e = (int32_t)mic - ((s_g * (int32_t)ref) >> 15);
     s_g += (e * (int32_t)ref) >> AEC_ADAPT_SHIFT;
