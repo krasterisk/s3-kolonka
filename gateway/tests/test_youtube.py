@@ -16,11 +16,11 @@ class MusicIntentTest(unittest.TestCase):
         self.assertEqual(music_play_query("включи на ютубе кино"), "кино")
         self.assertEqual(
             music_play_query("Включи с YouTube хром или сказочный детектив"),
-            "хром или сказочный детектив",
+            "хрум или сказочный детектив",
         )
         self.assertEqual(
             music_play_query("включи хром или сказочный детектив"),
-            "хром или сказочный детектив",
+            "хрум или сказочный детектив",
         )
         self.assertEqual(music_play_query("включи маяк"), "маяк")
         self.assertEqual(music_play_query("включи сказочный детектив"), "сказочный детектив")
@@ -85,6 +85,11 @@ class YoutubeSearchTest(unittest.TestCase):
         self.assertIn("Rick", got[0]["title"])
         self.assertEqual(got[0]["url"], "yt://dQw4w9WgXcQ")
 
+    def test_хром_или_becomes_хрум_not_chrome(self):
+        alts = youtube.query_alternatives("Включи хром или сказочный детектив")
+        self.assertEqual(alts, ["сказочный детектив", "хрум"])
+        self.assertNotIn("хром", alts)
+
     def test_resolve_tries_или_alternative(self):
         seen = []
 
@@ -95,7 +100,7 @@ class YoutubeSearchTest(unittest.TestCase):
             return []
 
         picked = youtube.resolve_track("хром или сказочный детектив", search_fn=search)
-        self.assertEqual(seen, ["хром", "хрум", "сказочный детектив"])
+        self.assertEqual(seen, ["сказочный детектив"])
         self.assertEqual(picked["video_id"], "tale01")
 
     def test_resolve_uses_injected_search(self):

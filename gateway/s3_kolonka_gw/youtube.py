@@ -75,16 +75,26 @@ def cache_path(video_id, cfg):
     return Path(cfg["cache_dir"]) / safe
 
 
-def strip_service_words(text):
-    q = (text or "").strip()
-    q = re.sub(r"\b(?:с|на)\s+(?:youtube|ютуб[аеу]?)\b", " ", q, flags=re.I)
-    q = re.sub(r"\b(?:youtube|ютуб[аеу]?)\b", " ", q, flags=re.I)
-    return re.sub(r"\s+", " ", q).strip(" \t.!?,…«»\"'")
-
-
 _STT_ALIASES = {
     "хром": "хрум",
+    "крум": "хрум",
+    "chrome": "хрум",
 }
+
+
+def strip_service_words(text):
+    q = (text or "").strip()
+    q = re.sub(r"^(?:включ(?:и|ить|ай)|поставь|играй|запусти)\s+", "", q, flags=re.I)
+    q = re.sub(r"\b(?:с|на)\s+(?:youtube|ютуб[аеу]?)\b", " ", q, flags=re.I)
+    q = re.sub(r"\b(?:youtube|ютуб[аеу]?)\b", " ", q, flags=re.I)
+    q = re.sub(r"\s+", " ", q).strip(" \t.!?,…«»\"'")
+    if q and _STT_ALIASES:
+        pat = re.compile(
+            r"\b(%s)\b" % "|".join(re.escape(k) for k in sorted(_STT_ALIASES, key=len, reverse=True)),
+            re.I,
+        )
+        q = pat.sub(lambda m: _STT_ALIASES.get(m.group(0).lower(), m.group(0)), q)
+    return q
 
 
 def query_alternatives(query):
@@ -96,9 +106,7 @@ def query_alternatives(query):
     for part in parts:
         if part and part not in out:
             out.append(part)
-        alias = _STT_ALIASES.get(part.lower())
-        if alias and alias not in out:
-            out.append(alias)
+    out.sort(key=lambda s: (-len(s), s))
     return out
 
 
