@@ -17,6 +17,7 @@ DEFAULTS = {
     "bitrate_min": 128,
     "country_hint": "RU",
     "limit": 10,
+    "search_timeout": 5,
 }
 
 PICKER_PROMPT = (
@@ -76,6 +77,7 @@ def normalize_config(cfg=None):
     out["base_url"] = str(out["base_url"]).rstrip("/")
     out["codec"] = str(out.get("codec") or "MP3")
     out["limit"] = int(out.get("limit") or 8)
+    out["search_timeout"] = int(out.get("search_timeout") or 5)
     out["bitrate_min"] = int(out.get("bitrate_min") or 0)
     out["hide_broken"] = bool(out.get("hide_broken", True))
     out["reject_hls"] = bool(out.get("reject_hls", True))
@@ -253,7 +255,7 @@ def parse_picker_reply(text, candidates):
     return None
 
 
-def fetch_json(url, cfg, opener=None):
+def fetch_json(url, cfg, opener=None, timeout=None):
     cfg = normalize_config(cfg)
     req = urllib.request.Request(
         url,
@@ -261,7 +263,8 @@ def fetch_json(url, cfg, opener=None):
         method="GET",
     )
     handle = opener or urllib.request.build_opener()
-    with handle.open(req, timeout=20) as resp:
+    wait = cfg["search_timeout"] if timeout is None else timeout
+    with handle.open(req, timeout=wait) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -272,10 +275,11 @@ def search_stations(query, cfg, opener=None, fetch_fn=None):
     rows = []
     for plan in search_plans(query, cfg) or [{"name": query or ""}]:
         url = search_url(cfg, query, plan=plan)
+        log.info("radio search q=%s %s", query, plan)
         try:
             chunk = fetch(url) or []
         except Exception as exc:
-            log.warning("radio search failed: %s", exc)
+            log.warning("radio search failed %s: %s", plan, exc)
             continue
         for row in chunk:
             uuid = (row.get("stationuuid") or row.get("uuid") or "").strip()
@@ -283,6 +287,8 @@ def search_stations(query, cfg, opener=None, fetch_fn=None):
                 continue
             seen.add(uuid)
             rows.append(row)
+        if len(filter_stations(rows, cfg)) >= cfg["limit"]:
+            break
     return rows
 
 

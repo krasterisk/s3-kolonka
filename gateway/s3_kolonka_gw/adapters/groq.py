@@ -267,14 +267,13 @@ class GroqBackend(VoiceBackend):
 
         await self.status("thinking", "groq llm", heard=user_text)
         try:
-            reply, cmds = await loop.run_in_executor(None, self._chat, user_text)
+            reply, cmds, radio_err = await loop.run_in_executor(
+                None, self._reply_and_radio, user_text
+            )
         except Exception as exc:
             log.exception("llm")
             await self.status("error", "groq llm: %s" % exc)
             return
-        if not cmds:
-            cmds = heuristic_commands(user_text, self._vol, self._bl)
-        cmds, radio_err = attach_radio_play(cmds, user_text, self._pick_radio)
         if radio_err:
             reply = radio_err
         if cmds:
@@ -408,6 +407,13 @@ class GroqBackend(VoiceBackend):
                 log.warning("llm tools unsupported: %s %s", exc.code, body)
                 return self._complete(messages, use_tools=False)
             raise RuntimeError("llm HTTP %s %s" % (exc.code, body)) from exc
+
+    def _reply_and_radio(self, user_text: str):
+        reply, cmds = self._chat(user_text)
+        if not cmds:
+            cmds = heuristic_commands(user_text, self._vol, self._bl)
+        cmds, radio_err = attach_radio_play(cmds, user_text, self._pick_radio)
+        return reply, cmds, radio_err
 
     def _chat(self, user_text: str):
         messages = [{"role": "system", "content": _SYSTEM}]

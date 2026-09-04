@@ -365,6 +365,17 @@ class RadioProbeTest(unittest.TestCase):
         self.assertIn("tag=metal", url)
         self.assertNotIn("name=", url)
 
+    def test_search_stations_stops_when_enough_hits(self):
+        cfg = radio.normalize_config({"limit": 2})
+        calls = []
+
+        def fetch(url):
+            calls.append(url)
+            return SAMPLE
+
+        radio.search_stations("европа плюс", cfg, fetch_fn=fetch)
+        self.assertEqual(len(calls), 1)
+
     def test_search_stations_falls_back_to_tag(self):
         cfg = radio.normalize_config({})
         metal = {
