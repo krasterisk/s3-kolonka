@@ -46,6 +46,9 @@ bool afe_aec_start(void)
     }
 
     cfg->aec_init = true;
+    cfg->aec_mode = AEC_MODE_SR_LOW_COST;
+    /* Default AGGR NLP gates speech over radio; NORMAL keeps more of the word. */
+    cfg->aec_nlp_level = AEC_NLP_LEVEL_NORMAL;
     cfg->wakenet_init = false;
     cfg->vad_init = false;
     cfg->se_init = false;
@@ -53,7 +56,7 @@ bool afe_aec_start(void)
     cfg->afe_ringbuf_size = 16;
     /* Keep AFE work off core 0 so Wi-Fi / LWIP stay responsive. */
     cfg->afe_perferred_core = 1;
-    cfg->afe_perferred_priority = 4;
+    cfg->afe_perferred_priority = 5;
 
     s_iface = esp_afe_handle_from_config(cfg);
     if (!s_iface) {
@@ -79,7 +82,7 @@ bool afe_aec_start(void)
         return false;
     }
 
-    ESP_LOGI(TAG, "AEC-only AFE fmt=%s feed=%d ch=%d fetch=%d (no WakeNet)",
+    ESP_LOGI(TAG, "AEC-only AFE fmt=%s feed=%d ch=%d fetch=%d nlp=normal (no WakeNet)",
              fmt, s_feed_samples, s_feed_ch, s_fetch_samples);
     return true;
 }

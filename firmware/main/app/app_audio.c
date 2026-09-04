@@ -199,7 +199,28 @@ void app_audio_flush_preroll(void)
 {
 }
 
-static void handle_mono(const int16_t *mono, int frames)
+static void set_radio(bool on)
+{
+    s_radio = on;
+    /* Radio leaks into the mics; a slightly lower bar still hears Hey Jarvis. */
+    mww_set_cutoff(on ? 238 : 247);
+}
+
+static void maybe_wake(const int16_t *mono, int frames)
+{
+    if (!s_mww || s_listen || !s_standby || !mono || frames <= 0) {
+        return;
+    }
+    if (mww_feed(mono, frames)) {
+        ESP_LOGI(TAG, "wake hey-jarvis radio=%d play=%d", s_radio ? 1 : 0,
+                 s_playing ? 1 : 0);
+        if (s_wake_cb) {
+            s_wake_cb();
+        }
+    }
+}
+
+static void handle_mono(const int16_t *mono, int frames, bool do_wake)
 {
     if (!mono || frames <= 0) {
         return;
@@ -243,12 +264,8 @@ static void handle_mono(const int16_t *mono, int frames)
         s_mic_sink(mono, frames);
     }
 
-    if (s_mww && !s_listen && s_standby) {
-        if (mww_feed(mono, frames)) {
-            if (s_wake_cb) {
-                s_wake_cb();
-            }
-        }
+    if (do_wake) {
+        maybe_wake(mono, frames);
     }
 }
 
@@ -284,7 +301,7 @@ static void raw_mic_task(void *arg)
             const int16_t *slot = &buf[MIC_CHANNELS * i];
             mono[i] = cancel ? aec_cancel(slot[MIC_L_CH], slot[MIC_REF_CH]) : slot[MIC_L_CH];
         }
-        handle_mono(mono, frames);
+        handle_mono(mono, frames, true);
     }
 }
 
@@ -308,6 +325,14 @@ static void afe_feed_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
+    int16_t *wake_mono = heap_caps_malloc((size_t)samples * sizeof(int16_t),
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!wake_mono) {
+        wake_mono = malloc((size_t)samples * sizeof(int16_t));
+    }
+    if (!wake_mono) {
+        ESP_LOGW(TAG, "wake raw buffer missing, silence wake uses AFE");
+    }
 
     while (1) {
         if (esp_get_feed_data(true, buf, bytes) != ESP_OK) {
@@ -315,6 +340,13 @@ static void afe_feed_task(void *arg)
             continue;
         }
         afe_aec_feed(buf);
+        /* Hey Jarvis was trained on raw mic. AFE output in silence misses. */
+        if (wake_mono && !s_playing && !s_radio) {
+            for (int i = 0; i < samples; i++) {
+                wake_mono[i] = buf[ch * i + MIC_L_CH];
+            }
+            maybe_wake(wake_mono, samples);
+        }
     }
 }
 
@@ -337,20 +369,24 @@ static void afe_fetch_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
-        handle_mono(mono, n);
+        handle_mono(mono, n, false);
+        if (s_playing || s_radio) {
+            maybe_wake(mono, n);
+        }
     }
 }
 
-static void start_mic_task(TaskFunction_t fn, const char *name, uint32_t stack, int core)
+static void start_mic_task(TaskFunction_t fn, const char *name, uint32_t stack, int prio,
+                           int core)
 {
 #ifdef CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
-    if (xTaskCreatePinnedToCoreWithCaps(fn, name, stack, NULL, 4, NULL, core,
+    if (xTaskCreatePinnedToCoreWithCaps(fn, name, stack, NULL, prio, NULL, core,
                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS) {
         return;
     }
     ESP_LOGW(TAG, "%s PSRAM stack failed, using internal", name);
 #endif
-    xTaskCreatePinnedToCore(fn, name, stack, NULL, 4, NULL, core);
+    xTaskCreatePinnedToCore(fn, name, stack, NULL, prio, NULL, core);
 }
 
 static void mic_boot_task(void *arg)
@@ -369,12 +405,12 @@ static void mic_boot_task(void *arg)
              app_brain_ready() ? 1 : 0);
 
     if (intern > 40000 && afe_aec_start()) {
-        start_mic_task(afe_feed_task, "afe_feed", 8192, 0);
-        start_mic_task(afe_fetch_task, "afe_fetch", 8192, 1);
+        start_mic_task(afe_feed_task, "afe_feed", 8192, 4, 0);
+        start_mic_task(afe_fetch_task, "afe_fetch", 8192, 5, 1);
         ESP_LOGI(TAG, "audio ready afe-aec volume=%d wake=%s", s_volume,
                  s_mww ? "hey-jarvis" : "no");
     } else {
-        start_mic_task(raw_mic_task, "mic", 8192, 0);
+        start_mic_task(raw_mic_task, "mic", 8192, 4, 0);
         ESP_LOGW(TAG, "audio ready raw-mic volume=%d wake=%s internal=%u", s_volume,
                  s_mww ? "hey-jarvis" : "no", (unsigned)intern);
     }
@@ -423,9 +459,6 @@ void app_audio_play_end(void)
         pa_off();
         s_playing = false;
         aec_reset();
-        if (s_mww) {
-            mww_reset();
-        }
     }
     if (s_i2s) {
         xSemaphoreGive(s_i2s);
@@ -441,9 +474,6 @@ void app_audio_play_abort(void)
         pa_off();
         s_playing = false;
         aec_reset();
-        if (s_mww) {
-            mww_reset();
-        }
     }
     if (s_i2s) {
         xSemaphoreGive(s_i2s);
@@ -482,7 +512,7 @@ static int radio_event_cb(esp_asp_event_pkt_t *event, void *ctx)
         ESP_LOGI(TAG, "radio state %s", esp_audio_simple_player_state_to_str(st));
         if (st == ESP_ASP_STATE_ERROR || st == ESP_ASP_STATE_FINISHED) {
             s_radio_http = false;
-            s_radio = false;
+            set_radio(false);
             if (!s_playing) {
                 pa_off();
             }
@@ -571,7 +601,7 @@ void app_audio_radio_stop(void)
             esp_audio_simple_player_stop(s_radio_player);
         }
     }
-    s_radio = false;
+    set_radio(false);
     s_radio_http = false;
     aec_reset();
     if (!s_playing) {
@@ -586,7 +616,7 @@ bool app_audio_radio_start(const char *url)
         app_audio_play_abort();
         app_audio_radio_stop();
         s_radio_http = false;
-        s_radio = true;
+        set_radio(true);
         pa_on();
         ESP_LOGI(TAG, "radio pcm");
         return true;
@@ -599,11 +629,11 @@ bool app_audio_radio_start(const char *url)
     app_audio_play_abort();
     app_audio_radio_stop();
     s_radio_http = true;
-    s_radio = true;
+    set_radio(true);
     pa_on();
     if (esp_audio_simple_player_run(s_radio_player, uri, NULL) != ESP_OK) {
         ESP_LOGW(TAG, "radio run fail %s", uri);
-        s_radio = false;
+        set_radio(false);
         pa_off();
         return false;
     }

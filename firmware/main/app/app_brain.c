@@ -473,7 +473,8 @@ void app_brain_start(void)
         s_up_rb = xRingbufferCreate(16 * 1024, RINGBUF_TYPE_NOSPLIT);
     }
     app_audio_set_mic_sink(mic_sink);
-    xTaskCreatePinnedToCore(play_task, "brain_play", 4096, NULL, 5, NULL, 1);
+    /* Below afe_fetch (5) so Hey Jarvis can run while PCM radio plays. */
+    xTaskCreatePinnedToCore(play_task, "brain_play", 4096, NULL, 4, NULL, 1);
     xTaskCreatePinnedToCore(brain_task, "brain", 4096, NULL, 4, NULL, 0);
     ESP_LOGI(TAG, "brain ws://%s:%d", BRAIN_HOST, BRAIN_PORT);
 }

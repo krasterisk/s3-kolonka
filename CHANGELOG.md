@@ -26,6 +26,7 @@ and this project uses [Semantic Versioning](https://semver.org/) after 1.0.0.
 - Home dialog text is cleared when a new listen starts, on idle, and when radio starts or stops
 - AFE AEC starts after the brain socket so WebSocket no longer fails with `ESP_FAIL` from a starved internal heap
 - Setup portal skips AFE/MWW/brain and serves the Wi-Fi page from PSRAM so `192.168.4.1` is not an `oom` error
+- Hey Jarvis uses raw mic in silence and AFE-cleaned audio during radio; the play task yields to wake; radio lowers the detect cutoff
 
 ## [0.1.0] - 2026-09-03
 
