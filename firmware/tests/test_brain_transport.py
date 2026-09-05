@@ -24,8 +24,8 @@ class BrainTransportConfigTest(unittest.TestCase):
         )
         self.assertIsNotNone(chunk)
         self.assertIsNotNone(timeout)
-        self.assertGreaterEqual(int(chunk.group(1)), 640)
-        self.assertGreaterEqual(int(timeout.group(1)), 5000)
+        self.assertEqual(int(chunk.group(1)), 640)
+        self.assertEqual(int(timeout.group(1)), 5000)
         send_uplink = re.search(
             r"static int send_uplink\(.*?^}",
             BRAIN,
@@ -33,6 +33,7 @@ class BrainTransportConfigTest(unittest.TestCase):
         )
         self.assertIsNotNone(send_uplink)
         self.assertNotIn("vTaskDelay(", send_uplink.group(0))
+        self.assertIn("taskYIELD();", send_uplink.group(0))
 
     def test_ui_does_not_write_to_websocket(self):
         radio_stop = re.search(
