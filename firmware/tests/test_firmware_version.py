@@ -5,7 +5,7 @@ from pathlib import Path
 
 FIRMWARE = Path(__file__).resolve().parents[1]
 VERSION = (FIRMWARE / "VERSION").read_text(encoding="utf-8").strip()
-BUILD = (FIRMWARE / "BUILD").read_text(encoding="utf-8").strip()
+BUILD = (FIRMWARE / "BUILDNUM").read_text(encoding="utf-8").strip()
 APP_VERSION = (FIRMWARE / "main/app/app_version.h").read_text(encoding="utf-8")
 SETTINGS = (FIRMWARE / "main/ui/ui_settings.c").read_text(encoding="utf-8")
 CMAKE = (FIRMWARE / "CMakeLists.txt").read_text(encoding="utf-8")

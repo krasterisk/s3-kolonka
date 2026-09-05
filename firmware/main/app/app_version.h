@@ -1,12 +1,13 @@
 #pragma once
 
-/* Bump KOLONKA_BUILD (and firmware/BUILD) on every flashed image.
- * Bump KOLONKA_VERSION_* / firmware/VERSION when cutting a release. */
+/* Bump KOLONKA_BUILD (and firmware/BUILDNUM) on every flashed image.
+ * Bump KOLONKA_VERSION_* / firmware/VERSION when cutting a release.
+ * Do not use firmware/BUILD — on Windows it collides with the build/ dir. */
 
 #define KOLONKA_VERSION_MAJOR 0
 #define KOLONKA_VERSION_MINOR 1
 #define KOLONKA_VERSION_PATCH 1
-#define KOLONKA_BUILD 2
+#define KOLONKA_BUILD 3
 
 #define KOLONKA_VERSION_STR "0.1.1"
 

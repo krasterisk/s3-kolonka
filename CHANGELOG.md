@@ -9,8 +9,8 @@ and this project uses [Semantic Versioning](https://semver.org/) after 1.0.0.
 
 ### Added
 
-- Settings tab shows the firmware version and build number (`Прошивка 0.1.1+2`)
-- Firmware build numbering via `firmware/VERSION`, `firmware/BUILD`, and `app_version.h`
+- Settings tab shows the firmware version and build number (`Прошивка 0.1.1+3`)
+- Firmware build numbering via `firmware/VERSION`, `firmware/BUILDNUM`, and `app_version.h` (not `BUILD` — collides with `build/` on Windows)
 
 ### Changed
 
