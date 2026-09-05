@@ -9,9 +9,8 @@ and this project uses [Semantic Versioning](https://semver.org/) after 1.0.0.
 
 ### Added
 
-- Open-source repository layout (license, contributing, security, CI)
-- Gateway auto-stop on trailing silence
-- Speaker status line shows full `thinking` / `speaking`, then `Brain: groq`
+- Settings tab shows the firmware version and build number (`Прошивка 0.1.1+2`)
+- Firmware build numbering via `firmware/VERSION`, `firmware/BUILD`, and `app_version.h`
 
 ### Changed
 
