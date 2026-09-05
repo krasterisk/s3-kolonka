@@ -10,9 +10,13 @@ KCONFIG = (FIRMWARE / "main/Kconfig.projbuild").read_text(encoding="utf-8")
 
 
 class BrainTransportConfigTest(unittest.TestCase):
-    def test_full_duplex_websocket_uses_separate_tx_lock(self):
-        self.assertIn("CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y", SDKCONFIG)
-        self.assertIn("select ESP_WS_CLIENT_SEPARATE_TX_LOCK", KCONFIG)
+    def test_separate_tx_lock_stays_at_the_upstream_default(self):
+        """It aborts the connection on the send-error path (esp-protocols#898)
+        and buys nothing once brain_task is the only sender."""
+        self.assertNotIn("CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y", SDKCONFIG)
+        self.assertNotIn("select ESP_WS_CLIENT_SEPARATE_TX_LOCK", KCONFIG)
+        self.assertIn("#if CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK", BRAIN)
+        self.assertIn("#error", BRAIN)
 
     def test_pcm_frames_and_send_timeout_allow_realtime_uplink(self):
         chunk = re.search(r"#define UPLINK_CHUNK\s+(\d+)", BRAIN)

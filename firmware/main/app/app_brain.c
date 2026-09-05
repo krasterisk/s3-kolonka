@@ -19,6 +19,14 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
+#if CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK
+/* Only brain_task writes to the socket, so the second lock adds no
+ * concurrency. It does add the send-error path that closes the transport
+ * outside the client task (esp-protocols#898), which reconnect-loops us.
+ * Drop the line from firmware/sdkconfig and run idf.py reconfigure. */
+#error "Set CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=n"
+#endif
+
 #define BRAIN_HOST CONFIG_KOLONKA_BRAIN_HOST
 #define BRAIN_PORT CONFIG_KOLONKA_BRAIN_PORT
 #define UPLINK_CHUNK 640
