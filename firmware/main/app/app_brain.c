@@ -46,6 +46,7 @@ static RingbufHandle_t s_up_rb;
 static volatile bool s_accept_play;
 static volatile bool s_abort_play;
 static volatile uint32_t s_play_epoch;
+static volatile bool s_ws_dead;
 
 static const char *brain_uri(void)
 {
@@ -262,9 +263,10 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
         s_skip_idle = true;
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
-        set_status("Brain: down");
+        set_status("Brain: connecting");
         s_end_listen = true;
         s_listen_sent = false;
+        s_ws_dead = true;
         break;
     case WEBSOCKET_EVENT_DATA:
         if (!ev || ev->data_len <= 0 || !ev->data_ptr) {
@@ -279,6 +281,7 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
     case WEBSOCKET_EVENT_ERROR:
         s_end_listen = true;
         s_listen_sent = false;
+        s_ws_dead = true;
         if (ev) {
             snprintf(s_status, sizeof(s_status), "Brain: err %d",
                      ev->error_handle.esp_transport_sock_errno);
@@ -401,7 +404,7 @@ static void brain_task(void *arg)
                 .task_stack = 8192,
                 .network_timeout_ms = 60000,
                 .reconnect_timeout_ms = 3000,
-                .disable_auto_reconnect = false,
+                .disable_auto_reconnect = true,
                 .ping_interval_sec = 15,
                 .pingpong_timeout_sec = 90,
             };
@@ -429,19 +432,18 @@ static void brain_task(void *arg)
             continue;
         }
 
-        if (!esp_websocket_client_is_connected(s_ws)) {
+        if (s_ws_dead || !esp_websocket_client_is_connected(s_ws)) {
             if (s_end_listen) {
                 s_end_listen = false;
                 s_listen = false;
                 app_audio_set_listen(false);
             }
             flush_uplink();
-            if (++wait_ticks >= 24) {
-                set_status("Brain: retry");
-                brain_destroy();
-                wait_ticks = 0;
-            }
-            vTaskDelay(pdMS_TO_TICKS(500));
+            set_status("Brain: connecting");
+            s_ws_dead = false;
+            brain_destroy();
+            wait_ticks = 0;
+            vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
 

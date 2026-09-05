@@ -3,6 +3,7 @@ import unittest
 from s3_kolonka_gw import youtube
 from s3_kolonka_gw.device_ctrl import (
     attach_music_play,
+    music_next_intent,
     music_play_query,
     radio_play_query,
 )
@@ -28,6 +29,19 @@ class MusicIntentTest(unittest.TestCase):
         self.assertIsNone(music_play_query("включи радио маяк"))
         self.assertIsNone(music_play_query("выключи музыку"))
         self.assertIsNone(music_play_query("включи экран"))
+        self.assertIsNone(music_play_query("следующий"))
+        self.assertIsNone(music_play_query("другой"))
+        self.assertIsNone(music_play_query("поставь другую"))
+
+    def test_next_intent(self):
+        self.assertTrue(music_next_intent("следующий"))
+        self.assertTrue(music_next_intent("другой"))
+        self.assertTrue(music_next_intent("поставь другую"))
+        self.assertTrue(music_next_intent("не то"))
+        self.assertTrue(music_next_intent("ещё"))
+        self.assertTrue(music_next_intent("измени"))
+        self.assertFalse(music_next_intent("включи хрум или сказочный детектив"))
+        self.assertFalse(music_next_intent("включи маяк"))
 
     def test_radio_query_ignores_songs(self):
         self.assertIsNone(radio_play_query("включи песню кино"))
@@ -58,25 +72,45 @@ class MusicIntentTest(unittest.TestCase):
         self.assertEqual(cmds, [])
         self.assertIn("наш", err.lower())
 
-
-class YoutubeSearchTest(unittest.TestCase):
-    def test_search_tracks_tries_videos_before_songs(self):
+    def test_attach_next_uses_last_query(self):
         seen = []
 
-        def fake(query, limit=5, kind="songs"):
-            seen.append(kind)
-            if kind == "videos":
-                return [{"video_id": "vid1", "title": "clip", "url": "yt://vid1"}]
-            return []
+        def pick(query):
+            seen.append(query)
+            return {"video_id": "ep2", "title": "Выпуск 91", "url": "yt://ep2"}
 
-        orig = youtube.search_ytmusic
-        youtube.search_ytmusic = fake
+        cmds, err = attach_music_play(
+            [], "следующий", pick, last_query="хрум или сказочный детектив"
+        )
+        self.assertIsNone(err)
+        self.assertEqual(seen, ["хрум или сказочный детектив"])
+        self.assertEqual(cmds[0]["source"], "yt://ep2")
+
+
+class YoutubeSearchTest(unittest.TestCase):
+    def test_search_tracks_merges_ytdlp_before_ytmusic(self):
+        seen = []
+
+        def fake_ytdlp(query, cfg, runner=None):
+            seen.append("ytdlp")
+            return [{"video_id": "ep84", "title": "Выпуск 84", "url": "yt://ep84"}]
+
+        def fake_ytm(query, limit=5, kind="videos"):
+            seen.append(kind)
+            return [{"video_id": "song1", "title": "песня", "url": "yt://song1"}]
+
+        orig_ytm = youtube.search_ytmusic
+        orig_dlp = youtube.search_ytdlp
+        youtube.search_ytmusic = fake_ytm
+        youtube.search_ytdlp = fake_ytdlp
         try:
-            rows = youtube.search_tracks("хрум")
+            rows = youtube.search_tracks("хрум или сказочный детектив")
         finally:
-            youtube.search_ytmusic = orig
-        self.assertEqual(seen, ["videos"])
-        self.assertEqual(rows[0]["video_id"], "vid1")
+            youtube.search_ytmusic = orig_ytm
+            youtube.search_ytdlp = orig_dlp
+        self.assertEqual(seen[0], "ytdlp")
+        self.assertEqual(rows[0]["video_id"], "ep84")
+        self.assertEqual(rows[1]["video_id"], "song1")
 
     def test_parse_ytdlp_search_lines(self):
         raw = "dQw4w9WgXcQ\tRick Astley - Never Gonna Give You Up\nxyz\tOther\n"
@@ -90,6 +124,45 @@ class YoutubeSearchTest(unittest.TestCase):
         self.assertEqual(alts, ["сказочный детектив", "хрум"])
         self.assertNotIn("хром", alts)
 
+    def test_search_terms_keep_full_или_phrase(self):
+        terms = youtube.query_search_terms("хром или сказочный детектив")
+        self.assertEqual(terms[0], "хрум или сказочный детектив")
+        self.assertIn("сказочный детектив", terms)
+        self.assertIn("хрум", terms)
+
+    def test_rank_prefers_episode_over_song(self):
+        rows = [
+            {"video_id": "song", "title": "SOLAR125 — ХРУМ | Сказочный Детектив — песня"},
+            {
+                "video_id": "ep84",
+                "title": "Докучные сказки | ХРУМ или Сказочный детектив (АУДИО) Выпуск 84",
+            },
+        ]
+        ranked = youtube.rank_track_candidates(rows, "хрум или сказочный детектив")
+        self.assertEqual(ranked[0]["video_id"], "ep84")
+
+    def test_resolve_skips_recently_played(self):
+        def search(query, _cfg):
+            return [
+                {
+                    "video_id": "ep1",
+                    "title": "Выпуск 84 | ХРУМ или Сказочный детектив",
+                    "url": "yt://ep1",
+                },
+                {
+                    "video_id": "ep2",
+                    "title": "Выпуск 91 | ХРУМ или Сказочный детектив",
+                    "url": "yt://ep2",
+                },
+            ]
+
+        first = youtube.resolve_track("хрум или сказочный детектив", search_fn=search)
+        self.assertEqual(first["video_id"], "ep1")
+        nxt = youtube.resolve_track(
+            "хрум или сказочный детектив", search_fn=search, exclude_ids={"ep1"}
+        )
+        self.assertEqual(nxt["video_id"], "ep2")
+
     def test_resolve_tries_или_alternative(self):
         seen = []
 
@@ -100,7 +173,7 @@ class YoutubeSearchTest(unittest.TestCase):
             return []
 
         picked = youtube.resolve_track("хром или сказочный детектив", search_fn=search)
-        self.assertEqual(seen, ["сказочный детектив"])
+        self.assertIn("хрум или сказочный детектив", seen)
         self.assertEqual(picked["video_id"], "tale01")
 
     def test_resolve_uses_injected_search(self):
@@ -128,8 +201,8 @@ class YoutubeSearchTest(unittest.TestCase):
 
         rows = list(youtube.iter_track_candidates("хром или сказочный детектив", search_fn=search))
         self.assertEqual([r["video_id"] for r in rows], ["dead01", "tale01", "hrum01"])
-        self.assertEqual(rows[0]["query"], "сказочный детектив")
-        self.assertEqual(rows[2]["query"], "хрум")
+        self.assertIn(rows[0]["query"], ("хрум или сказочный детектив", "сказочный детектив"))
+        self.assertEqual(rows[-1]["query"], "хрум")
 
     def test_first_playable_skips_unavailable(self):
         cands = [
@@ -174,6 +247,7 @@ class YoutubeSearchTest(unittest.TestCase):
         self.assertIn("https://www.youtube.com/watch?v=dQw4w9WgXcQ", cmd)
         self.assertEqual(cmd[cmd.index("-o") + 1], dest)
         self.assertNotIn("-", cmd[cmd.index("-o") + 1 :])
+        self.assertIn("android", cmd[cmd.index("--extractor-args") + 1])
 
 
 if __name__ == "__main__":

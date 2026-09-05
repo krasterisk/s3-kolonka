@@ -120,9 +120,11 @@ static const char *friendly_status(void)
     if (strstr(b, "radio")) {
         return "Радио";
     }
+    if (strstr(b, "connecting")) {
+        return "Связь";
+    }
     if (strstr(b, "down") || strstr(b, "error") || strstr(b, "err ") ||
-        strstr(b, "fail") || strstr(b, "retry") || strstr(b, "wait wifi") ||
-        strstr(b, "connecting")) {
+        strstr(b, "fail") || strstr(b, "retry") || strstr(b, "wait wifi")) {
         return "Нет связи";
     }
     if (!app_brain_ready()) {

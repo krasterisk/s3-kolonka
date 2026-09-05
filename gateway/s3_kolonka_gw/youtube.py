@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 import subprocess
@@ -10,7 +11,7 @@ log = logging.getLogger("gw.youtube")
 DEFAULTS = {
     "enabled": True,
     "cache_dir": "/var/cache/s3-kolonka-yt",
-    "search_limit": 5,
+    "search_limit": 8,
     "search_timeout": 20,
     "ytdlp": "",
     "ffmpeg": "",
@@ -110,6 +111,98 @@ def query_alternatives(query):
     return out
 
 
+def query_search_terms(query):
+    q = strip_service_words(query)
+    if not q:
+        return []
+    out = [q]
+    for part in query_alternatives(q):
+        if part and part not in out:
+            out.append(part)
+    return out
+
+
+_SHOW_RE = re.compile(
+    r"выпуск|\bаудио\b|подкаст|передач|эфир|детск\w*\s+радио",
+    re.I,
+)
+_SONG_RE = re.compile(
+    r"\bпесн[яи]|гимн|instrumental|минус\b|ai song|рок-н-ролл|solar125",
+    re.I,
+)
+
+
+def title_relevance(title, query):
+    raw = title or ""
+    tl = raw.lower()
+    q = strip_service_words(query).lower()
+    score = 0
+    if q and q in tl:
+        score += 30
+    for tok in q.split():
+        if len(tok) > 2 and tok in tl:
+            score += 4
+    if _SHOW_RE.search(raw):
+        score += 20
+    if _SONG_RE.search(raw):
+        score -= 18
+    return score
+
+
+def rank_track_candidates(rows, query, exclude_ids=None):
+    skip = set(exclude_ids or [])
+    scored = []
+    for row in rows or []:
+        vid = (row.get("video_id") or "").strip()
+        if not vid or vid in skip:
+            continue
+        scored.append((title_relevance(row.get("title") or "", query), row))
+    scored.sort(key=lambda item: (-item[0], item[1].get("title") or ""))
+    return [row for _score, row in scored]
+
+
+def _played_path(cfg):
+    cfg = normalize_config(cfg)
+    return Path(cfg["cache_dir"]) / "played.json"
+
+
+def _read_played(cfg):
+    path = _played_path(cfg)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def remember_played(query, video_id, cfg=None):
+    key = strip_service_words(query).lower()
+    vid = (video_id or "").strip()
+    if not key or not vid:
+        return
+    data = _read_played(cfg)
+    ids = [i for i in (data.get(key) or []) if i != vid]
+    ids.append(vid)
+    data[key] = ids[-24:]
+    data["__last__"] = key
+    path = _played_path(cfg)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        log.warning("played save failed: %s", exc)
+
+
+def played_ids(query, cfg=None):
+    key = strip_service_words(query).lower()
+    data = _read_played(cfg)
+    return list(data.get(key) or [])
+
+
+def last_played_query(cfg=None):
+    return str(_read_played(cfg).get("__last__") or "").strip()
+
+
 def parse_search_lines(text):
     out = []
     for line in (text or "").splitlines():
@@ -187,17 +280,25 @@ def search_tracks(query, cfg=None):
     q = strip_service_words(query)
     if not q:
         return []
-    for kind in ("videos", "songs", None):
-        rows = search_ytmusic(q, limit=cfg["search_limit"], kind=kind)
-        if rows:
-            return rows
-    return search_ytdlp(q, cfg)
+    seen = set()
+    out = []
+    batches = [search_ytdlp(q, cfg)]
+    for kind in ("videos", "songs"):
+        batches.append(search_ytmusic(q, limit=cfg["search_limit"], kind=kind))
+    for rows in batches:
+        for row in rows or []:
+            vid = (row.get("video_id") or "").strip()
+            if not vid or vid in seen:
+                continue
+            seen.add(vid)
+            out.append(row)
+    return out
 
 
 def iter_track_candidates(query, cfg=None, search_fn=None):
     finder = search_fn or search_tracks
     seen = set()
-    for part in query_alternatives(query) or [strip_service_words(query)]:
+    for part in query_search_terms(query) or [strip_service_words(query)]:
         if not part:
             continue
         for row in finder(part, cfg) or []:
@@ -210,9 +311,15 @@ def iter_track_candidates(query, cfg=None, search_fn=None):
             yield item
 
 
-def resolve_track(query, cfg=None, search_fn=None):
-    for row in iter_track_candidates(query, cfg, search_fn):
-        return dict(row)
+def resolve_track(query, cfg=None, search_fn=None, exclude_ids=None):
+    rows = list(iter_track_candidates(query, cfg, search_fn))
+    ranked = rank_track_candidates(rows, query, exclude_ids=exclude_ids)
+    if ranked:
+        return dict(ranked[0])
+    if exclude_ids:
+        ranked = rank_track_candidates(rows, query)
+        if ranked:
+            return dict(ranked[0])
     return None
 
 
@@ -229,7 +336,7 @@ def ytdlp_error_unavailable(err):
     )
 
 
-def first_playable_track(candidates, download_fn, limit=5):
+def first_playable_track(candidates, download_fn, limit=8):
     for i, row in enumerate(candidates or []):
         if i >= limit:
             break
@@ -265,7 +372,7 @@ def ytdlp_download_cmd(source, dest, ytdlp=None):
         "--no-playlist",
         "--no-warnings",
         "--extractor-args",
-        "youtube:player_client=android_vr,web_safari,default",
+        "youtube:player_client=android,android_vr,web,default",
         "-o",
         str(dest),
         watch,
@@ -344,8 +451,13 @@ __all__ = [
     "first_playable_track",
     "is_youtube_source",
     "iter_track_candidates",
+    "last_played_query",
     "normalize_config",
     "parse_search_lines",
+    "played_ids",
+    "query_search_terms",
+    "rank_track_candidates",
+    "remember_played",
     "resolve_track",
     "search_tracks",
     "video_id_from_source",

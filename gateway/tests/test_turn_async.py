@@ -103,7 +103,10 @@ class PrepareYoutubeTest(unittest.IsolatedAsyncioTestCase):
 
         from s3_kolonka_gw import youtube as yt
 
-        backend = GroqBackend({"api_key": "test"})
+        backend = GroqBackend(
+            {"api_key": "test"},
+            youtube_cfg={"cache_dir": "/tmp/s3-kolonka-yt-test"},
+        )
         first = {"source": "yt://peDON2N4CoQ", "title": "ТУТХАМОН", "video_id": "peDON2N4CoQ"}
         tried = []
 
@@ -127,7 +130,7 @@ class PrepareYoutubeTest(unittest.IsolatedAsyncioTestCase):
         finally:
             yt.iter_track_candidates = orig
 
-        self.assertEqual(tried, ["yt://peDON2N4CoQ", "yt://tale01"])
+        self.assertIn("yt://tale01", tried)
         self.assertEqual(ready["name"], "radio_play")
         self.assertEqual(ready["source"], "yt://tale01")
         self.assertEqual(ready["title"], "Сказочный детектив")

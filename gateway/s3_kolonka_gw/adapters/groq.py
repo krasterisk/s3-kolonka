@@ -13,6 +13,7 @@ from s3_kolonka_gw.device_ctrl import (
     attach_music_play,
     attach_radio_play,
     heuristic_commands,
+    music_next_intent,
     music_play_query,
     radio_play_query,
     spoken_ack,
@@ -50,6 +51,7 @@ _SYSTEM = (
     "play_radio вызывай только если в фразе есть слово «радио». "
     "Иначе включить что-то (песню, мультфильм, «хрум», «сказочный детектив», "
     "название через «или», «с youtube») — play_music, источник YouTube. "
+    "другой / следующий / не то / ещё — следующий выпуск той же передачи. "
     "Выключить радио или музыку — stop_radio. "
     "Не выдумывай названия станций, треков и URL. "
     "Если инструмент вернул ask — озвучь этот вопрос. "
@@ -85,6 +87,7 @@ class GroqBackend(VoiceBackend):
         self._mode = "tap"
         self._vol = 50
         self._bl = 70
+        self._yt_last_query = ""
         self._reset_vad()
 
     def _reset_vad(self):
@@ -534,7 +537,10 @@ class GroqBackend(VoiceBackend):
         reply, cmds = self._chat(user_text)
         if not cmds:
             cmds = heuristic_commands(user_text, self._vol, self._bl)
-        cmds, music_err = attach_music_play(cmds, user_text, self._pick_music)
+        last_q = self._yt_last_query or youtube.last_played_query(self.youtube_cfg)
+        cmds, music_err = attach_music_play(
+            cmds, user_text, self._pick_music, last_query=last_q
+        )
         if music_err:
             return reply, cmds, music_err
         cmds, radio_err = attach_radio_play(cmds, user_text, self._pick_radio)
@@ -576,7 +582,10 @@ class GroqBackend(VoiceBackend):
                     else:
                         tool_body = {"ok": False, "error": "no station"}
                 if name == "play_music":
-                    picked = self._pick_music((args.get("query") or user_text or "").strip())
+                    q = (args.get("query") or user_text or "").strip()
+                    if music_next_intent(q) or music_next_intent(user_text):
+                        q = self._yt_last_query or youtube.last_played_query(self.youtube_cfg) or q
+                    picked = self._pick_music(q)
                     if picked and (picked.get("url") or picked.get("video_id")):
                         extra = [youtube.device_music_cmd(picked)]
                         cmds.extend(extra)
@@ -627,7 +636,7 @@ class GroqBackend(VoiceBackend):
         )
         merged = []
         seen = set()
-        for row in list(rows) + list(more or []):
+        for row in list(more or []) + list(rows):
             vid = (row.get("video_id") or youtube.video_id_from_source(row.get("url") or "") or "").strip()
             if not vid or vid in seen:
                 continue
@@ -636,16 +645,22 @@ class GroqBackend(VoiceBackend):
             item["video_id"] = vid
             item["url"] = (item.get("url") or ("yt://%s" % vid)).strip()
             merged.append(item)
+        skip = set(youtube.played_ids(query, self.youtube_cfg))
+        merged = youtube.rank_track_candidates(merged, query, exclude_ids=skip) or youtube.rank_track_candidates(
+            merged, query
+        )
 
         async def download(row):
             await self._ensure_youtube_file(row["url"])
 
-        for row in merged[:5]:
+        for row in merged[:8]:
             try:
                 await download(row)
             except Exception as exc:
                 log.warning("youtube skip %s: %s", row.get("video_id"), exc)
                 continue
+            youtube.remember_played(query, row.get("video_id"), self.youtube_cfg)
+            self._yt_last_query = youtube.strip_service_words(query)
             log.info(
                 "youtube pick %s %s q=%s",
                 row.get("video_id"),
@@ -657,7 +672,8 @@ class GroqBackend(VoiceBackend):
 
     def _pick_music(self, query: str):
         try:
-            picked = youtube.resolve_track(query, self.youtube_cfg)
+            skip = set(youtube.played_ids(query, self.youtube_cfg))
+            picked = youtube.resolve_track(query, self.youtube_cfg, exclude_ids=skip)
             if picked:
                 log.info(
                     "youtube search %s %s q=%s",

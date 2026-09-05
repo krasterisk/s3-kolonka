@@ -96,9 +96,10 @@ TOOLS = [
         "function": {
             "name": "play_music",
             "description": (
-                "Play a song, artist, cartoon, or YouTube clip by spoken name "
-                "(Кино Группа крови, хрум, сказочный детектив). "
+                "Play a song, artist, cartoon, podcast, or YouTube clip by spoken name "
+                "(Кино Группа крови, хрум или сказочный детектив). "
                 "Default for включи/поставь when the user did not say радио. "
+                "другой / следующий / не то — next clip of the same show, not a new search. "
                 "The server searches YouTube and streams audio only. "
                 "Do not invent video IDs or URLs."
             ),
@@ -213,6 +214,12 @@ _STRIP_MUSIC_LEAD = re.compile(
 _NOT_STATION = re.compile(
     r"^(экран|колонк|звук|микрофон|себя|свет|яркост|громкост)"
 )
+_ONLY_NEXT = re.compile(
+    r"^(?:следующ\w*|друг(?:ой|ая|ое|ую|ие)|ещё|еще|смени|измени|"
+    r"не\s+то|не\s+это|дальше|next)"
+    r"(?:\s+(?:один|раз|выпуск|сери\w*|трек|песн\w*))?$",
+    re.IGNORECASE,
+)
 
 
 def radio_play_query(text: str) -> str | None:
@@ -254,14 +261,28 @@ def music_play_query(text: str) -> str | None:
     query = _STRIP_MUSIC_LEAD.sub("", query).strip()
     if _NOT_STATION.search(query):
         return None
+    if music_next_intent(query):
+        return None
     return query or None
 
 
-def attach_music_play(cmds: list[dict], user_text: str, pick_fn) -> tuple[list[dict], str | None]:
+def music_next_intent(text: str) -> bool:
+    t = youtube.strip_service_words(text) or (text or "").strip()
+    t = re.sub(r"^(?:поставь|играй|запусти)\s+", "", t, flags=re.I).strip()
+    return bool(t and _ONLY_NEXT.match(t))
+
+
+def attach_music_play(
+    cmds: list[dict], user_text: str, pick_fn, last_query: str = ""
+) -> tuple[list[dict], str | None]:
     cmds = list(cmds or [])
     if any(c.get("name") == "radio_play" for c in cmds):
         return cmds, None
     query = music_play_query(user_text)
+    if query is None and music_next_intent(user_text):
+        query = (last_query or "").strip()
+        if not query:
+            return cmds, "Сначала включите передачу или песню."
     if query is None:
         return cmds, None
     picked = pick_fn(query or user_text)

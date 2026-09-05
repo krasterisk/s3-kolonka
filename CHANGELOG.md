@@ -32,6 +32,8 @@ and this project uses [Semantic Versioning](https://semver.org/) after 1.0.0.
 - Voice can play a YouTube / YouTube Music track: the gateway searches, yt-dlp extracts audio, ffmpeg sends PCM like radio
 - YouTube play starts only after a file is cached; unavailable IDs are skipped for the next search hit
 - If the speaker drops mid-listen, the gateway keeps the clip and finishes the turn on reconnect
+- YouTube keeps the full «или» show title, prefers episodes, and skips already played clips (другой / следующий)
+- After radio stop the speaker reconnects immediately instead of sitting on retry
 
 ## [0.1.0] - 2026-09-03
 
