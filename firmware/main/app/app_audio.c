@@ -20,11 +20,18 @@
 #define RADIO_HAS_CVT 1
 #endif
 #include "aec.h"
+#include "afe_aec.h"
+#include "app_brain.h"
+#include "app_wifi.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#ifdef CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+#include "freertos/idf_additions.h"
+#endif
 #include "mww.h"
 
 #define PA_GPIO GPIO_NUM_15
@@ -166,6 +173,16 @@ int app_audio_mic_level(void)
 
 void app_audio_set_listen(bool on)
 {
+    if (on) {
+        /* pcm:// radio_play leaves s_radio set; if the stream errors without
+         * idle, mic uplink stays muted while the UI still shows «Слушаю». */
+        if (s_radio) {
+            app_audio_radio_stop();
+        }
+        if (s_playing) {
+            app_audio_play_abort();
+        }
+    }
     s_listen = on;
     s_listen_samples = 0;
     s_silence_samples = 0;
@@ -192,7 +209,71 @@ void app_audio_flush_preroll(void)
 {
 }
 
-static void mic_task(void *arg)
+static void set_radio(bool on)
+{
+    s_radio = on;
+    /* Radio leaks into the mics; a slightly lower bar still hears Hey Jarvis. */
+    mww_set_cutoff(on ? 238 : 247);
+}
+
+static void maybe_wake(const int16_t *mono, int frames)
+{
+    if (!s_mww || s_listen || !s_standby || !mono || frames <= 0) {
+        return;
+    }
+    if (mww_feed(mono, frames)) {
+        ESP_LOGI(TAG, "wake hey-jarvis radio=%d play=%d", s_radio ? 1 : 0,
+                 s_playing ? 1 : 0);
+        if (s_wake_cb) {
+            s_wake_cb();
+        }
+    }
+}
+
+static void handle_mono(const int16_t *mono, int frames, bool do_wake)
+{
+    if (!mono || frames <= 0) {
+        return;
+    }
+    int64_t acc = 0;
+    for (int i = 0; i < frames; i++) {
+        acc += (int32_t)mono[i] * (int32_t)mono[i];
+    }
+    int level = (int)(sqrtf((float)acc / (float)frames) / (float)MIC_UI_DIV);
+    if (level < MIC_UI_GATE) {
+        level = 0;
+    } else {
+        level -= MIC_UI_GATE;
+    }
+    if (level > 100) {
+        level = 100;
+    }
+    s_mic_level = (s_mic_level * 2 + level) / 3;
+
+    if (s_listen) {
+        /* Explicit listen wins over a sticky pcm:// radio flag so uplink is not
+         * muted while the UI shows «Слушаю». */
+        if (s_radio) {
+            set_radio(false);
+            s_radio_http = false;
+        }
+        s_listen_samples += frames;
+        /* Do not cut on a short pause — the gateway VAD ends the turn. */
+        if (s_listen_samples >= SAMPLE_RATE * 12) {
+            s_listen = false;
+            s_mic_level = 0;
+        }
+        if (s_mic_sink) {
+            s_mic_sink(mono, frames);
+        }
+    }
+
+    if (do_wake) {
+        maybe_wake(mono, frames);
+    }
+}
+
+static void raw_mic_task(void *arg)
 {
     (void)arg;
     const int frames = 160;
@@ -218,61 +299,140 @@ static void mic_task(void *arg)
             continue;
         }
 
-        /* RMNM: ch0 is DAC loopback, ch1 is the mic. Cancel echo only while
-         * the speaker is up so standby wake sees clean mic samples. */
-        bool cancel = s_playing || s_radio;
         int16_t mono[160];
-        int64_t acc = 0;
+        bool cancel = s_playing || s_radio;
         for (int i = 0; i < frames; i++) {
             const int16_t *slot = &buf[MIC_CHANNELS * i];
-            int16_t clean = cancel ? aec_process(slot[MIC_L_CH], slot[MIC_REF_CH])
-                                   : slot[MIC_L_CH];
-            mono[i] = clean;
-            acc += (int32_t)clean * (int32_t)clean;
+            mono[i] = cancel ? aec_cancel(slot[MIC_L_CH], slot[MIC_REF_CH]) : slot[MIC_L_CH];
         }
-        int level = (int)(sqrtf((float)acc / (float)frames) / (float)MIC_UI_DIV);
-        if (level < MIC_UI_GATE) {
-            level = 0;
-        } else {
-            level -= MIC_UI_GATE;
-        }
-        if (level > 100) {
-            level = 100;
-        }
-        s_mic_level = (s_mic_level * 2 + level) / 3;
+        handle_mono(mono, frames, true);
+    }
+}
 
-        if (s_listen && !s_playing) {
-            s_listen_samples += frames;
-            if (s_listen_samples > SAMPLE_RATE * 4 / 10) {
-                if (level >= 12) {
-                    s_speech_seen = true;
-                    s_silence_samples = 0;
-                } else if (s_speech_seen) {
-                    s_silence_samples += frames;
-                    if (s_silence_samples >= SAMPLE_RATE * 12 / 10) {
-                        s_listen = false;
-                        s_mic_level = 0;
-                    }
-                }
+static void afe_feed_task(void *arg)
+{
+    (void)arg;
+    int samples = afe_aec_feed_samples();
+    int ch = afe_aec_feed_ch();
+    if (samples <= 0 || ch <= 0) {
+        ESP_LOGE(TAG, "afe feed size bad");
+        vTaskDelete(NULL);
+        return;
+    }
+    int bytes = samples * ch * (int)sizeof(int16_t);
+    int16_t *buf = heap_caps_malloc((size_t)bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        buf = malloc((size_t)bytes);
+    }
+    if (!buf) {
+        ESP_LOGE(TAG, "afe feed alloc failed");
+        vTaskDelete(NULL);
+        return;
+    }
+    int16_t *wake_mono = heap_caps_malloc((size_t)samples * sizeof(int16_t),
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!wake_mono) {
+        wake_mono = malloc((size_t)samples * sizeof(int16_t));
+    }
+    if (!wake_mono) {
+        ESP_LOGW(TAG, "wake raw buffer missing, silence wake uses AFE");
+    }
+
+    while (1) {
+        if (esp_get_feed_data(true, buf, bytes) != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        afe_aec_feed(buf);
+        /* Hey Jarvis was trained on raw mic. AFE output in silence misses.
+         * Listen must still run if pcm:// left s_radio stuck without idle.
+         * Listen also wins over sticky s_playing (xiaozhi EnableVoiceProcessing
+         * after IsPlaybackIdle — we abort DAC and keep feeding STT). */
+        if (wake_mono && (s_listen || (!s_playing && !s_radio))) {
+            if (s_listen && s_playing) {
+                app_audio_play_abort();
             }
-            if (s_listen_samples >= SAMPLE_RATE * 12) {
-                s_listen = false;
-                s_mic_level = 0;
+            for (int i = 0; i < samples; i++) {
+                wake_mono[i] = buf[ch * i + MIC_L_CH];
             }
-        }
-
-        if (s_mic_sink && !s_playing && s_listen) {
-            s_mic_sink(mono, frames);
-        }
-
-        if (s_mww && !s_listen && s_standby) {
-            if (mww_feed(mono, frames)) {
-                if (s_wake_cb) {
-                    s_wake_cb();
-                }
+            if (!s_listen) {
+                maybe_wake(wake_mono, samples);
+            }
+            if (s_listen) {
+                /* STT uses raw mic; AFE after radio/TTS gates the voice as echo. */
+                handle_mono(wake_mono, samples, false);
             }
         }
     }
+}
+
+static void afe_fetch_task(void *arg)
+{
+    (void)arg;
+    int16_t *mono = heap_caps_malloc(1024 * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!mono) {
+        mono = malloc(1024 * sizeof(int16_t));
+    }
+    if (!mono) {
+        ESP_LOGE(TAG, "afe fetch alloc failed");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    while (1) {
+        int n = afe_aec_fetch(mono, 1024);
+        if (n <= 0) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        if (!(s_listen && !s_radio)) {
+            handle_mono(mono, n, false);
+        }
+        if (s_playing || s_radio) {
+            maybe_wake(mono, n);
+        }
+    }
+}
+
+static void start_mic_task(TaskFunction_t fn, const char *name, uint32_t stack, int prio,
+                           int core)
+{
+#ifdef CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    if (xTaskCreatePinnedToCoreWithCaps(fn, name, stack, NULL, prio, NULL, core,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS) {
+        return;
+    }
+    ESP_LOGW(TAG, "%s PSRAM stack failed, using internal", name);
+#endif
+    xTaskCreatePinnedToCore(fn, name, stack, NULL, prio, NULL, core);
+}
+
+static void mic_boot_task(void *arg)
+{
+    (void)arg;
+    for (int i = 0; i < 150; i++) {
+        if (app_brain_ready()) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    size_t intern = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGI(TAG, "mic boot heap=%u internal=%u brain=%d",
+             (unsigned)esp_get_free_heap_size(), (unsigned)intern,
+             app_brain_ready() ? 1 : 0);
+
+    if (intern > 40000 && afe_aec_start()) {
+        start_mic_task(afe_feed_task, "afe_feed", 8192, 4, 0);
+        start_mic_task(afe_fetch_task, "afe_fetch", 8192, 5, 1);
+        ESP_LOGI(TAG, "audio ready afe-aec volume=%d wake=%s", s_volume,
+                 s_mww ? "hey-jarvis" : "no");
+    } else {
+        start_mic_task(raw_mic_task, "mic", 8192, 4, 0);
+        ESP_LOGW(TAG, "audio ready raw-mic volume=%d wake=%s internal=%u", s_volume,
+                 s_mww ? "hey-jarvis" : "no", (unsigned)intern);
+    }
+    vTaskDelete(NULL);
 }
 
 void app_audio_set_mic_sink(app_audio_mic_sink_t sink)
@@ -317,9 +477,6 @@ void app_audio_play_end(void)
         pa_off();
         s_playing = false;
         aec_reset();
-        if (s_mww) {
-            mww_reset();
-        }
     }
     if (s_i2s) {
         xSemaphoreGive(s_i2s);
@@ -335,9 +492,6 @@ void app_audio_play_abort(void)
         pa_off();
         s_playing = false;
         aec_reset();
-        if (s_mww) {
-            mww_reset();
-        }
     }
     if (s_i2s) {
         xSemaphoreGive(s_i2s);
@@ -376,7 +530,7 @@ static int radio_event_cb(esp_asp_event_pkt_t *event, void *ctx)
         ESP_LOGI(TAG, "radio state %s", esp_audio_simple_player_state_to_str(st));
         if (st == ESP_ASP_STATE_ERROR || st == ESP_ASP_STATE_FINISHED) {
             s_radio_http = false;
-            s_radio = false;
+            set_radio(false);
             if (!s_playing) {
                 pa_off();
             }
@@ -465,12 +619,12 @@ void app_audio_radio_stop(void)
             esp_audio_simple_player_stop(s_radio_player);
         }
     }
-    s_radio = false;
+    set_radio(false);
     s_radio_http = false;
+    /* pcm:// YouTube leaves s_playing true via play_pcm16; clearing only
+     * s_radio left the mic uplink muted forever (is_playing gate). */
+    app_audio_play_abort();
     aec_reset();
-    if (!s_playing) {
-        pa_off();
-    }
 }
 
 bool app_audio_radio_start(const char *url)
@@ -480,7 +634,7 @@ bool app_audio_radio_start(const char *url)
         app_audio_play_abort();
         app_audio_radio_stop();
         s_radio_http = false;
-        s_radio = true;
+        set_radio(true);
         pa_on();
         ESP_LOGI(TAG, "radio pcm");
         return true;
@@ -493,11 +647,11 @@ bool app_audio_radio_start(const char *url)
     app_audio_play_abort();
     app_audio_radio_stop();
     s_radio_http = true;
-    s_radio = true;
+    set_radio(true);
     pa_on();
     if (esp_audio_simple_player_run(s_radio_player, uri, NULL) != ESP_OK) {
         ESP_LOGW(TAG, "radio run fail %s", uri);
-        s_radio = false;
+        set_radio(false);
         pa_off();
         return false;
     }
@@ -520,6 +674,10 @@ void app_audio_start(void)
 
     app_audio_set_volume(s_volume);
     app_audio_chime();
+    if (app_wifi_is_setup_ap()) {
+        ESP_LOGI(TAG, "setup AP: skip mww/afe so the portal has RAM");
+        return;
+    }
     esp_asp_cfg_t radio_cfg = {
         .in.cb = NULL,
         .in.user_ctx = NULL,
@@ -543,8 +701,7 @@ void app_audio_start(void)
     if (!s_mww) {
         ESP_LOGW(TAG, "mww off, tap listen only");
     }
-    /* Core 0: mic + wake. Core 1: play. Same-core play at prio 5 starved MWW
-     * during radio, so Hey Jarvis died and stayed dead after stop. */
-    xTaskCreatePinnedToCore(mic_task, "mic", 8192, NULL, 5, NULL, 0);
-    ESP_LOGI(TAG, "audio ready, volume=%d wake=%s", s_volume, s_mww ? "hey-jarvis" : "no");
+    /* AFE after the brain socket: AEC used to starve internal RAM so
+     * esp_websocket_client_start() returned ESP_FAIL. */
+    xTaskCreatePinnedToCore(mic_boot_task, "mic_boot", 4096, NULL, 3, NULL, 0);
 }

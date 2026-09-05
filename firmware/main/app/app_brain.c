@@ -19,8 +19,17 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
+#if CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK
+/* Only brain_task writes to the socket, so the second lock adds no
+ * concurrency. It does add the send-error path that closes the transport
+ * outside the client task (esp-protocols#898), which reconnect-loops us.
+ * Drop the line from firmware/sdkconfig and run idf.py reconfigure. */
+#error "Set CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=n"
+#endif
+
 #define BRAIN_HOST CONFIG_KOLONKA_BRAIN_HOST
 #define BRAIN_PORT CONFIG_KOLONKA_BRAIN_PORT
+#define UPLINK_CHUNK 640
 
 static const char *TAG = "brain";
 static esp_websocket_client_handle_t s_ws;
@@ -30,7 +39,21 @@ static volatile bool s_end_listen;
 static volatile bool s_wake_mode;
 static volatile bool s_cmd_ready;
 static volatile bool s_skip_idle;
+static volatile bool s_radio_stop_pending;
 static bool s_listen_sent;
+/* Ignore end-listen from a stale idle that races a brand-new listen — otherwise
+ * the UI flashes «Слушаю» → «Готов» with no speech. thinking/speaking still end
+ * listen immediately (stale gen only); a long protect muted wake by leaving
+ * s_listen stuck. */
+static TickType_t s_listen_protect_until;
+/* After a transport blip, keep listen briefly so a short reconnect can
+ * re-bind. Absolute deadline from the FIRST blip — reconnect must NOT reset
+ * it (storms of ~80 ms open→drop under YouTube would otherwise extend listen
+ * forever and mute wake for minutes after Stop). Clear only after ~500 ms
+ * stable online, or when listen ends. */
+static TickType_t s_listen_offline_deadline;
+static TickType_t s_listen_online_since;
+static int s_status_gen = -1;
 static char s_status[48] = "Brain: wait";
 static char s_backend[16] = "gw";
 static char s_heard[256];
@@ -42,9 +65,11 @@ static char s_cmd_title[64];
 static char s_brain_uri[96];
 static RingbufHandle_t s_play_rb;
 static RingbufHandle_t s_up_rb;
+static RingbufHandle_t s_txt_rb;
 static volatile bool s_accept_play;
 static volatile bool s_abort_play;
 static volatile uint32_t s_play_epoch;
+static volatile bool s_ws_dead;
 
 static const char *brain_uri(void)
 {
@@ -98,6 +123,30 @@ static void send_json(const char *json)
     }
 }
 
+static int send_uplink(const uint8_t *data, int n)
+{
+    if (!s_ws || !data || n <= 0) {
+        return -1;
+    }
+    int off = 0;
+    while (off < n) {
+        int take = n - off;
+        if (take > UPLINK_CHUNK) {
+            take = UPLINK_CHUNK;
+        }
+        int sent = esp_websocket_client_send_bin(
+            s_ws, (const char *)(data + off), take, pdMS_TO_TICKS(5000));
+        if (sent < 0) {
+            return sent;
+        }
+        off += take;
+        /* The mic ring and TCP write provide backpressure. A timed delay here
+         * throttles raw PCM below real time when the FreeRTOS tick is 100 Hz. */
+        taskYIELD();
+    }
+    return off;
+}
+
 static void flush_uplink(void)
 {
     if (!s_up_rb) {
@@ -125,6 +174,21 @@ static void flush_play(void)
             break;
         }
         vRingbufferReturnItem(s_play_rb, item);
+    }
+}
+
+static void flush_text(void)
+{
+    if (!s_txt_rb) {
+        return;
+    }
+    while (1) {
+        size_t n = 0;
+        char *item = (char *)xRingbufferReceive(s_txt_rb, &n, 0);
+        if (!item) {
+            break;
+        }
+        vRingbufferReturnItem(s_txt_rb, item);
     }
 }
 
@@ -158,18 +222,24 @@ static void handle_text(const char *data, int len)
             }
             const cJSON *heard = cJSON_GetObjectItem(root, "heard");
             const cJSON *reply = cJSON_GetObjectItem(root, "reply");
-            if (strcmp(st, "live") == 0) {
+            /* live / idle / radio: drop leftover dialog. Station title lives on Media. */
+            if (strcmp(st, "live") == 0 || strcmp(st, "idle") == 0 ||
+                strcmp(st, "radio") == 0) {
                 clear_turn_text();
-            }
-            if (cJSON_IsString(heard) && heard->valuestring) {
-                copy_utf8(s_heard, sizeof(s_heard), heard->valuestring);
-            }
-            if (cJSON_IsString(reply) && reply->valuestring) {
-                copy_utf8(s_reply, sizeof(s_reply), reply->valuestring);
+            } else {
+                if (cJSON_IsString(heard) && heard->valuestring) {
+                    copy_utf8(s_heard, sizeof(s_heard), heard->valuestring);
+                }
+                if (cJSON_IsString(reply) && reply->valuestring) {
+                    copy_utf8(s_reply, sizeof(s_reply), reply->valuestring);
+                }
             }
             if (strcmp(st, "live") == 0 || strcmp(st, "thinking") == 0 ||
                 strcmp(st, "error") == 0) {
                 request_abort_play();
+                /* pcm:// YouTube/radio sets s_radio; live/thinking/error must
+                 * clear it or the next «Слушаю» shows UI with a muted mic. */
+                app_audio_radio_stop();
             } else if (strcmp(st, "radio") == 0) {
                 s_abort_play = false;
                 s_accept_play = true;
@@ -177,20 +247,46 @@ static void handle_text(const char *data, int len)
                 s_accept_play = true;
                 app_audio_radio_stop();
             } else if (strcmp(st, "idle") == 0) {
-                s_accept_play = false;
-                if (app_audio_is_radio()) {
-                    s_abort_play = true;
-                }
+                /* Always abort PCM — YouTube pcm:// may have cleared s_radio
+                 * while s_playing is still true. */
+                request_abort_play();
                 app_audio_radio_stop();
             }
+            const cJSON *gen_j = cJSON_GetObjectItem(root, "gen");
+            int msg_gen = cJSON_IsNumber(gen_j) ? (int)gen_j->valuedouble : -1;
+            if (strcmp(st, "live") == 0) {
+                /* New listen session: idle-protect; gen updated below. */
+                s_skip_idle = true;
+                s_listen_protect_until =
+                    xTaskGetTickCount() + pdMS_TO_TICKS(800);
+            }
+            /* Older gens are stale. Equal/newer must apply — otherwise a lost
+             * live frame made thinking/idle with gen+1 look "stale" forever
+             * (!=) and left listen stuck or rejected the whole turn. */
+            bool stale_gen =
+                (s_status_gen >= 0 && msg_gen >= 0 && msg_gen < s_status_gen);
+            if (!stale_gen && msg_gen >= 0) {
+                s_status_gen = msg_gen;
+            }
+            bool idle_protect =
+                (s_listen_protect_until != 0 &&
+                 xTaskGetTickCount() < s_listen_protect_until);
+            /* thinking/speaking/error/radio must end listen even inside the
+             * short window — blocking them left s_listen stuck, which muted
+             * wake (maybe_wake bails while listening) and made the next tap
+             * flash «Слушаю»→«Готов». Stale gen still drops old-turn noise. */
             if (strcmp(st, "thinking") == 0 || strcmp(st, "speaking") == 0 ||
                 strcmp(st, "error") == 0 || strcmp(st, "radio") == 0) {
-                s_end_listen = true;
+                if (!stale_gen) {
+                    s_end_listen = true;
+                    s_listen_protect_until = 0;
+                }
             } else if (strcmp(st, "idle") == 0) {
                 if (s_skip_idle) {
                     s_skip_idle = false;
-                } else {
+                } else if (!stale_gen && !idle_protect) {
                     s_end_listen = true;
+                    s_listen_protect_until = 0;
                 }
             }
         } else if (strcmp(type->valuestring, "cmd") == 0) {
@@ -210,11 +306,31 @@ static void handle_text(const char *data, int len)
                 if (cJSON_IsString(title) && title->valuestring) {
                     copy_utf8(s_cmd_title, sizeof(s_cmd_title), title->valuestring);
                 }
+                if (strcmp(s_cmd_name, "radio_play") == 0 ||
+                    strcmp(s_cmd_name, "radio_stop") == 0) {
+                    clear_turn_text();
+                }
                 s_cmd_ready = true;
             }
         }
     }
     cJSON_Delete(root);
+}
+
+static void drain_text(void)
+{
+    if (!s_txt_rb) {
+        return;
+    }
+    while (1) {
+        size_t n = 0;
+        char *item = (char *)xRingbufferReceive(s_txt_rb, &n, 0);
+        if (!item) {
+            return;
+        }
+        handle_text(item, (int)n);
+        vRingbufferReturnItem(s_txt_rb, item);
+    }
 }
 
 static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -226,28 +342,57 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "connected");
         set_status("Brain: online");
+        s_ws_dead = false;
         s_need_hello = true;
         s_listen_sent = false;
         s_skip_idle = true;
+        /* Do NOT clear offline deadline here — a reconnect storm would
+         * reset it forever. Track online-since; brain_task clears deadline
+         * only after ~500 ms stable. */
+        s_listen_online_since = xTaskGetTickCount();
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
-        set_status("Brain: down");
-        s_end_listen = true;
+        set_status("Brain: connecting");
+        /* Do not end listen on the first blip. Journals show ~80 ms
+         * open→drop storms under YouTube; killing listen each time made
+         * every tap «Слушаю→Готов» (+6). Arm a short ABSOLUTE deadline
+         * from the first blip (reconnect must not extend it). */
+        s_listen_online_since = 0;
+        if (s_listen && s_listen_offline_deadline == 0) {
+            s_listen_offline_deadline =
+                xTaskGetTickCount() + pdMS_TO_TICKS(2000);
+        }
         s_listen_sent = false;
+        s_ws_dead = true;
         break;
     case WEBSOCKET_EVENT_DATA:
         if (!ev || ev->data_len <= 0 || !ev->data_ptr) {
             break;
         }
-        if (ev->op_code == 1) {
-            handle_text(ev->data_ptr, ev->data_len);
-        } else if (ev->op_code == 2 && s_play_rb && s_accept_play) {
+        if (ev->op_code == 1 && s_txt_rb) {
+            /* Queue only. Parsing JSON or stopping I2S here used to hold
+             * client->lock across EVENT_DATA on 1.4 and starve send_bin
+             * (IDFGH-13387 / esp-protocols#625). Client >=1.5 releases that
+             * lock, but I2S stop still must not run in the RX task. */
+            if (xRingbufferSend(s_txt_rb, ev->data_ptr, (size_t)ev->data_len, 0) != pdTRUE) {
+                ESP_LOGW(TAG, "text drop");
+            }
+        } else if (ev->op_code == 2 && s_play_rb && s_accept_play && !s_listen) {
+            /* Never arm DAC while listening. In-flight YouTube PCM after
+             * radio_stop/listen re-set s_playing and muted mic uplink
+             * (xiaozhi waits for IsPlaybackIdle before EnableVoiceProcessing). */
             xRingbufferSend(s_play_rb, ev->data_ptr, (size_t)ev->data_len, 0);
         }
         break;
     case WEBSOCKET_EVENT_ERROR:
-        s_end_listen = true;
+        /* Same as DISCONNECTED: absolute grace deadline, not instant end. */
+        s_listen_online_since = 0;
+        if (s_listen && s_listen_offline_deadline == 0) {
+            s_listen_offline_deadline =
+                xTaskGetTickCount() + pdMS_TO_TICKS(2000);
+        }
         s_listen_sent = false;
+        s_ws_dead = true;
         if (ev) {
             snprintf(s_status, sizeof(s_status), "Brain: err %d",
                      ev->error_handle.esp_transport_sock_errno);
@@ -294,12 +439,20 @@ static void play_task(void *arg)
             continue;
         }
         idle_ms = 0;
+        if (s_listen || app_audio_is_listening()) {
+            /* Drop leftover radio/TTS PCM — never re-arm s_playing during listen. */
+            vRingbufferReturnItem(s_play_rb, item);
+            if (app_audio_is_playing()) {
+                app_audio_play_abort();
+            }
+            continue;
+        }
         const int16_t *mono = (const int16_t *)item;
         int samples = (int)n / (int)sizeof(int16_t);
         int off = 0;
         uint32_t epoch = s_play_epoch;
         while (off < samples) {
-            if (s_abort_play || epoch != s_play_epoch) {
+            if (s_abort_play || epoch != s_play_epoch || s_listen) {
                 break;
             }
             int take = samples - off;
@@ -323,7 +476,14 @@ static void mic_sink(const int16_t *mono, int samples)
         return;
     }
     if (app_audio_is_playing()) {
-        return;
+        /* Explicit listen must win. Sticky s_playing after pcm:// used to
+         * drop every uplink frame → gateway too-short → Слушаю→Готов. */
+        ESP_LOGW(TAG, "uplink while playing — abort dac");
+        request_abort_play();
+        app_audio_play_abort();
+        if (app_audio_is_playing()) {
+            return;
+        }
     }
     if (xRingbufferSend(s_up_rb, mono, (size_t)samples * sizeof(int16_t), 0) != pdTRUE) {
         ESP_LOGW(TAG, "uplink drop");
@@ -360,18 +520,26 @@ static void brain_task(void *arg)
                      (unsigned)esp_get_free_heap_size(),
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                      brain_uri());
+            /* Pin WS RX next to LWIP (core 0), above afe_feed (prio 4).
+             * task_core_id is ignored unless task_core_id_set is true (1.7+).
+             * Keep one client: destroy() mid-handshake aborts TCP without a
+             * close frame (~80 ms on the gateway) and reconnect-loops. */
             esp_websocket_client_config_t cfg = {
                 .uri = s_brain_uri,
                 .host = BRAIN_HOST,
                 .port = BRAIN_PORT,
                 .path = "/",
                 .transport = WEBSOCKET_TRANSPORT_OVER_TCP,
-                .buffer_size = 4096,
+                .buffer_size = 8192,
+                .task_stack = 8192,
+                .task_prio = 6,
+                .task_core_id = 0,
+                .task_core_id_set = true,
                 .network_timeout_ms = 60000,
                 .reconnect_timeout_ms = 3000,
                 .disable_auto_reconnect = false,
-                .ping_interval_sec = 20,
-                .pingpong_timeout_sec = 120,
+                .ping_interval_sec = 15,
+                .pingpong_timeout_sec = 90,
             };
             s_ws = esp_websocket_client_init(&cfg);
             if (!s_ws) {
@@ -383,10 +551,15 @@ static void brain_task(void *arg)
             esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, on_ws, NULL);
             esp_err_t err = esp_websocket_client_start(s_ws);
             if (err != ESP_OK) {
-                ESP_LOGE(TAG, "start fail %s heap=%u", esp_err_to_name(err),
-                         (unsigned)esp_get_free_heap_size());
+                size_t intern = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+                ESP_LOGE(TAG, "start fail %s heap=%u internal=%u", esp_err_to_name(err),
+                         (unsigned)esp_get_free_heap_size(), (unsigned)intern);
                 brain_destroy();
-                snprintf(s_status, sizeof(s_status), "Brain: st %s", esp_err_to_name(err));
+                if (intern < 24576) {
+                    set_status("Brain: no ram");
+                } else {
+                    snprintf(s_status, sizeof(s_status), "Brain: st %s", esp_err_to_name(err));
+                }
                 vTaskDelay(pdMS_TO_TICKS(2000));
             }
             continue;
@@ -396,10 +569,31 @@ static void brain_task(void *arg)
             if (s_end_listen) {
                 s_end_listen = false;
                 s_listen = false;
+                s_listen_offline_deadline = 0;
+                s_listen_online_since = 0;
+                app_audio_set_listen(false);
+            } else if (s_listen && s_listen_offline_deadline != 0 &&
+                       xTaskGetTickCount() >= s_listen_offline_deadline) {
+                /* Absolute grace from first blip expired — free wake.
+                 * Reconnect storms must not extend this (+7 reset bug). */
+                ESP_LOGW(TAG, "listen ended after offline grace");
+                s_listen = false;
+                s_listen_offline_deadline = 0;
+                s_listen_online_since = 0;
                 app_audio_set_listen(false);
             }
-            flush_uplink();
+            if (s_ws_dead) {
+                /* One-shot cleanup after ERROR/DISCONNECTED; do not tear down
+                 * the client — auto-reconnect owns the transport. */
+                drain_text();
+                flush_uplink();
+                flush_text();
+                s_ws_dead = false;
+            }
+            set_status("Brain: connecting");
+            /* ~12 s of offline before a full recreate (was immediate destroy). */
             if (++wait_ticks >= 24) {
+                ESP_LOGW(TAG, "ws stuck offline, recreate");
                 set_status("Brain: retry");
                 brain_destroy();
                 wait_ticks = 0;
@@ -409,25 +603,59 @@ static void brain_task(void *arg)
         }
 
         wait_ticks = 0;
+        /* Stable online ≥500 ms → first-blip deadline no longer applies. */
+        if (s_listen_offline_deadline != 0 && s_listen_online_since != 0 &&
+            (xTaskGetTickCount() - s_listen_online_since) >= pdMS_TO_TICKS(500)) {
+            s_listen_offline_deadline = 0;
+        }
+        /* Deadline can fire while we look "connected" during a flap. */
+        if (s_listen && s_listen_offline_deadline != 0 &&
+            xTaskGetTickCount() >= s_listen_offline_deadline) {
+            ESP_LOGW(TAG, "listen ended after offline grace");
+            s_listen = false;
+            s_listen_offline_deadline = 0;
+            s_listen_online_since = 0;
+            app_audio_set_listen(false);
+        }
+        drain_text();
         if (s_need_hello) {
             s_need_hello = false;
             send_json("{\"type\":\"hello\",\"device\":\"s3-kolonka\"}");
         }
+        if (s_radio_stop_pending) {
+            s_radio_stop_pending = false;
+            send_json("{\"type\":\"radio_stop\"}");
+        }
         if (s_end_listen) {
             s_end_listen = false;
-            s_listen = false;
-            app_audio_set_listen(false);
+            /* Only a stale idle is deferred by idle-protect. thinking/speaking
+             * clear protect when they set s_end_listen, so wake can resume. */
+            bool idle_protect = (s_listen_protect_until != 0 &&
+                                 xTaskGetTickCount() < s_listen_protect_until);
+            if (!idle_protect) {
+                s_listen = false;
+                app_audio_set_listen(false);
+            }
         }
         if (s_listen != s_listen_sent) {
             s_listen_sent = s_listen;
             if (!s_listen) {
                 flush_uplink();
+                s_listen_protect_until = 0;
             }
             if (s_listen) {
+                s_skip_idle = true;
+                /* Short idle-only shield against a late idle racing the listen
+                 * JSON. Must stay short so a real turn can end listen. */
+                s_listen_protect_until =
+                    xTaskGetTickCount() + pdMS_TO_TICKS(800);
                 request_abort_play();
+                flush_play();
                 app_audio_radio_stop();
                 send_json(s_wake_mode ? "{\"type\":\"listen\",\"mode\":\"wake\"}"
                                       : "{\"type\":\"listen\",\"mode\":\"tap\"}");
+                /* Let the listen frame leave before the PCM burst. */
+                vTaskDelay(pdMS_TO_TICKS(80));
                 app_audio_flush_preroll();
             } else {
                 send_json("{\"type\":\"stop\"}");
@@ -435,11 +663,11 @@ static void brain_task(void *arg)
         }
 
         size_t n = 0;
-        uint8_t *item = xRingbufferReceive(s_up_rb, &n, pdMS_TO_TICKS(s_listen ? 20 : 200));
+        uint8_t *item = xRingbufferReceive(s_up_rb, &n, pdMS_TO_TICKS(s_listen ? 20 : 50));
         if (!item) {
             continue;
         }
-        int sent = esp_websocket_client_send_bin(s_ws, (const char *)item, (int)n, pdMS_TO_TICKS(1500));
+        int sent = send_uplink(item, (int)n);
         if (sent < 0) {
             ESP_LOGW(TAG, "uplink send %d", sent);
             s_end_listen = true;
@@ -459,14 +687,33 @@ void app_brain_start(void)
     if (!s_up_rb) {
         s_up_rb = xRingbufferCreate(16 * 1024, RINGBUF_TYPE_NOSPLIT);
     }
+    s_txt_rb = xRingbufferCreateWithCaps(8 * 1024, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
+    if (!s_txt_rb) {
+        s_txt_rb = xRingbufferCreate(4 * 1024, RINGBUF_TYPE_NOSPLIT);
+    }
+    if (!s_txt_rb) {
+        ESP_LOGE(TAG, "text ring alloc fail");
+    }
     app_audio_set_mic_sink(mic_sink);
-    xTaskCreatePinnedToCore(play_task, "brain_play", 4096, NULL, 5, NULL, 1);
-    xTaskCreatePinnedToCore(brain_task, "brain", 4096, NULL, 4, NULL, 0);
+    /* Both on core 1. Core 0 is Wi-Fi/LWIP; a listen send loop there drops TCP. */
+    xTaskCreatePinnedToCore(play_task, "brain_play", 4096, NULL, 4, NULL, 1);
+    xTaskCreatePinnedToCore(brain_task, "brain", 4096, NULL, 4, NULL, 1);
     ESP_LOGI(TAG, "brain ws://%s:%d", BRAIN_HOST, BRAIN_PORT);
 }
 
 void app_brain_set_listen(bool on)
 {
+    if (on) {
+        clear_turn_text();
+        /* Arm idle-protect before brain_task runs so a stale idle in the same
+         * tick cannot clear s_listen before the listen JSON is sent. */
+        s_skip_idle = true;
+        s_listen_protect_until = xTaskGetTickCount() + pdMS_TO_TICKS(800);
+        s_listen_offline_deadline = 0;
+    } else {
+        s_listen_protect_until = 0;
+        s_listen_offline_deadline = 0;
+    }
     s_listen = on;
 }
 
@@ -484,7 +731,9 @@ void app_brain_radio_stop(void)
 {
     request_abort_play();
     app_audio_radio_stop();
-    send_json("{\"type\":\"radio_stop\"}");
+    clear_turn_text();
+    /* brain_task is the sole application owner of WebSocket TX. */
+    s_radio_stop_pending = true;
 }
 
 bool app_brain_take_cmd(char *name, int name_len, int *value)

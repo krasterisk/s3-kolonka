@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -10,11 +11,16 @@ from s3_kolonka_gw.adapters.base import VoiceBackend
 from s3_kolonka_gw.device_ctrl import (
     TOOLS,
     apply_tool,
+    attach_music_play,
     attach_radio_play,
     heuristic_commands,
+    music_next_intent,
+    music_play_query,
+    radio_play_query,
     spoken_ack,
 )
 from s3_kolonka_gw import radio
+from s3_kolonka_gw import youtube
 from s3_kolonka_gw.pcmutil import (
     RADIO_FRAME_BYTES,
     audio_to_pcm16,
@@ -25,6 +31,7 @@ from s3_kolonka_gw.pcmutil import (
     pcm16_to_wav,
     piper_to_pcm16,
     radio_drop_for_live,
+    radio_pace_sleep_s,
 )
 from s3_kolonka_gw.wake import match_wake
 
@@ -35,26 +42,32 @@ _MAX_BYTES = 16000 * 2 * 12
 _CHUNK = 3200
 _SPEECH_RMS = 400.0
 _GRACE_MS = 800
-_SILENCE_MS = 1200
+_SILENCE_MS = 2500
 _MAX_LISTEN_MS = 12000
 _SYSTEM = (
     "Ты голосовой ассистент умной колонки. Отвечай кратко, по-русски, "
     "без списков и разметки. Одно-три предложения. "
     "Если просят громкость, яркость, выключить или включить колонку — "
     "вызови соответствующую функцию. "
-    "Если просят включить радио или станцию — вызови play_radio с тем, "
-    "как сказал пользователь. Выключить радио — stop_radio. "
-    "Не выдумывай URL потока."
+    "play_radio вызывай только если в фразе есть слово «радио». "
+    "Иначе включить что-то (песню, мультфильм, «хрум», «сказочный детектив», "
+    "название через «или», «с youtube») — play_music, источник YouTube. "
+    "другой / следующий / не то / ещё — следующий выпуск той же передачи. "
+    "Выключить радио или музыку — stop_radio. "
+    "Не выдумывай названия станций, треков и URL. "
+    "Если инструмент вернул ask — озвучь этот вопрос. "
+    "Если станции или трека нет — попроси уточнить."
 )
 
 
 class GroqBackend(VoiceBackend):
     name = "groq"
 
-    def __init__(self, cfg=None, radio_cfg=None):
+    def __init__(self, cfg=None, radio_cfg=None, youtube_cfg=None):
         cfg = cfg or {}
         self.api_key = (cfg.get("api_key") or os.environ.get("GROQ_API_KEY") or "").strip()
         self.radio_cfg = radio.normalize_config(radio_cfg)
+        self.youtube_cfg = youtube.normalize_config(youtube_cfg)
         self.stt_model = cfg.get("stt_model") or "whisper-large-v3-turbo"
         self.llm_model = cfg.get("llm_model") or "openai/gpt-oss-20b"
         self.voice = cfg.get("voice") or "ru-RU-SvetlanaNeural"
@@ -69,11 +82,13 @@ class GroqBackend(VoiceBackend):
         self._history = []
         self._turn_task = None
         self._radio_proc = None
+        self._ytdlp_proc = None
         self._gen = 0
         self._pcm_epoch = -1
         self._mode = "tap"
         self._vol = 50
         self._bl = 70
+        self._yt_last_query = ""
         self._reset_vad()
 
     def _reset_vad(self):
@@ -111,7 +126,7 @@ class GroqBackend(VoiceBackend):
         self._buf.clear()
         self._reset_vad()
         log.info("listen mode=%s gen=%s", self._mode, self._gen)
-        await self.status("live", "groq")
+        await self.status("live", "groq", gen=self._gen)
 
     async def send_pcm(self, data: bytes):
         if not self._listening or self._busy or not data:
@@ -144,6 +159,11 @@ class GroqBackend(VoiceBackend):
             log.info("auto-stop max listen %sms heard=%s", self._listen_ms, self._heard)
             await self.stop()
 
+    def listen_pcm_snapshot(self) -> bytes:
+        if not self._listening or self._busy:
+            return b""
+        return bytes(self._buf)
+
     async def stop(self):
         if self._busy:
             return
@@ -152,57 +172,108 @@ class GroqBackend(VoiceBackend):
         pcm = bytes(self._buf)
         self._buf.clear()
         self._reset_vad()
+        log.info("stop listen bytes=%s gen=%s", len(pcm), self._gen)
         self._turn_task = asyncio.create_task(self._run_turn(pcm), name="gw-turn")
 
     async def _run_turn(self, pcm: bytes):
+        turn_gen = self._gen
         try:
-            await self._finish_turn(pcm)
+            await self._finish_turn(pcm, turn_gen)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("turn failed")
+            if self._gen == turn_gen:
+                try:
+                    await self.status("error", "turn failed", gen=turn_gen)
+                except Exception:
+                    pass
         finally:
+            # Always clear: listen() may have bumped _gen while cancelling us.
             self._busy = False
+
+    async def _status_if(self, turn_gen: int, state: str, detail: str = "", **kwargs):
+        if self._gen != turn_gen:
+            return False
+        # Pin turn_gen on the wire. Reading self._gen inside on_status after an
+        # await would mis-label a late idle with the newer listen generation.
+        await self.status(state, detail, gen=turn_gen, **kwargs)
+        return True
+
+    async def _emit_cmds_if(self, turn_gen: int, cmds):
+        if self._gen != turn_gen:
+            return
+        await self._emit_cmds(cmds)
 
     async def close(self):
         self._pcm_epoch = -1
+        # Kill ffmpeg/yt-dlp first so a cancelled turn unblocks out of
+        # communicate()/stdout.read, then wait briefly for the task.
         await self._kill_radio()
-        task = self._turn_task
-        if task and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        await self._cancel_turn()
 
     async def stop_radio(self):
         log.info("radio stop")
+        # Bump gen + tear down media. Must return fast: awaiting a turn stuck
+        # in yt-dlp/executor/WS backpressure used to block the whole device
+        # session for minutes (no listen until TCP timeout).
+        self._gen += 1
         self._pcm_epoch = -1
+        self._listening = False
         await self._kill_radio()
-        await self.status("idle", "groq", reply="Радио выключено.")
+        await self._cancel_turn()
+        self._busy = False
+        await self.status("idle", "groq", reply="Радио выключено.", gen=self._gen)
+
+    async def _cancel_turn(self):
+        task = self._turn_task
+        if not task or task.done():
+            return
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        except Exception:
+            log.exception("cancel turn")
 
     async def _kill_radio(self):
-        proc = self._radio_proc
+        procs = [self._radio_proc, self._ytdlp_proc]
         self._radio_proc = None
-        if not proc:
-            return
-        if proc.returncode is None:
-            proc.kill()
+        self._ytdlp_proc = None
+        for proc in procs:
+            if not proc:
+                continue
+            if proc.returncode is None:
+                # yt-dlp/ffmpeg spawn children; kill the whole process group
+                # (created with start_new_session=True). Killing only the parent
+                # left downloads running and the next listen wedged for minutes.
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
             try:
-                await proc.wait()
+                # communicate() drains stdout/stderr. Plain wait() after an
+                # early _pump_pcm break (epoch/cancel) deadlocks forever when
+                # the PIPE still has unread bytes — Stop then wedges the WS
+                # session until TCP timeout ("works again after a long time").
+                await asyncio.wait_for(proc.communicate(), timeout=1.5)
             except Exception:
-                pass
+                try:
+                    transport = getattr(proc, "_transport", None)
+                    if transport is not None:
+                        transport.close()
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=0.5)
+                except Exception:
+                    pass
 
-    async def _stream_radio(self, url: str):
-        try:
-            cmd = ffmpeg_radio_cmd(url)
-        except Exception as exc:
-            log.warning("radio ffmpeg cmd: %s", exc)
-            await self.status("error", "radio decode: %s" % exc)
-            return
-        log.info("radio ffmpeg %s", url)
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        self._radio_proc = proc
+    async def _pump_pcm(self, proc, pace=False):
         on_pcm = getattr(self, "_on_pcm", None)
         started = None
         sent = 0
@@ -217,9 +288,15 @@ class GroqBackend(VoiceBackend):
                 now = asyncio.get_event_loop().time()
                 if started is None:
                     started = now
+                    log.info("radio pcm start")
                 if radio_drop_for_live(sent, now - started):
-                    dropped += 1
-                    continue
+                    if pace:
+                        delay = radio_pace_sleep_s(sent, now - started)
+                        if delay:
+                            await asyncio.sleep(min(delay, 0.08))
+                    else:
+                        dropped += 1
+                        continue
                 if on_pcm:
                     await on_pcm(data)
                 sent += len(data)
@@ -228,88 +305,234 @@ class GroqBackend(VoiceBackend):
         except Exception as exc:
             log.warning("radio stream failed: %s", exc)
         finally:
-            if dropped:
-                log.info("radio drop %s frames to stay live", dropped)
+            log.info("radio pcm sent=%s drop=%s", sent, dropped)
             await self._kill_radio()
 
-    async def _finish_turn(self, pcm: bytes):
+    async def _stream_radio(self, url: str):
+        if youtube.is_youtube_source(url):
+            await self._stream_youtube(url)
+            return
+        try:
+            cmd = ffmpeg_radio_cmd(url)
+        except Exception as exc:
+            log.warning("radio ffmpeg cmd: %s", exc)
+            await self.status("error", "radio decode: %s" % exc)
+            return
+        log.info("radio ffmpeg %s", url)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self._radio_proc = proc
+        await self._pump_pcm(proc)
+
+    async def _ensure_youtube_file(self, source: str):
+        cached = youtube.cached_file(source, self.youtube_cfg)
+        if cached:
+            log.info("youtube cache %s", cached)
+            return cached
+        vid = youtube.video_id_from_source(source)
+        dest = youtube.cache_path(vid, self.youtube_cfg)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".part")
+        if tmp.exists():
+            tmp.unlink()
+        cmd = youtube.ytdlp_download_cmd(source, tmp, ytdlp=self.youtube_cfg.get("ytdlp") or "")
+        log.info("youtube yt-dlp download %s", source)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        self._ytdlp_proc = proc
+        try:
+            _out, err = await asyncio.wait_for(proc.communicate(), timeout=90)
+        except asyncio.TimeoutError:
+            await self._kill_radio()
+            raise RuntimeError("youtube download timeout")
+        except asyncio.CancelledError:
+            # stop_radio/close may already have cleared _ytdlp_proc — still
+            # reap THIS proc so a cancelled download cannot outlive Stop.
+            if self._ytdlp_proc is proc:
+                self._ytdlp_proc = None
+            if proc.returncode is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=0.5)
+            except Exception:
+                pass
+            raise
+        finally:
+            if self._ytdlp_proc is proc:
+                self._ytdlp_proc = None
+        if proc.returncode != 0:
+            raise RuntimeError((err or b"").decode("utf-8", "replace")[-240:] or "yt-dlp failed")
+        src = tmp if tmp.is_file() else None
+        if src is None:
+            extras = sorted(
+                dest.parent.glob(tmp.name + "*"),
+                key=lambda p: p.stat().st_size if p.is_file() else 0,
+                reverse=True,
+            )
+            src = extras[0] if extras else None
+        if not src or not src.is_file() or src.stat().st_size <= 4096:
+            raise RuntimeError("youtube empty download")
+        src.replace(dest)
+        return dest
+
+    async def _stream_youtube(self, source: str):
+        try:
+            path = await self._ensure_youtube_file(source)
+            cmd = youtube.ffmpeg_file_cmd(str(path))
+        except Exception as exc:
+            log.warning("youtube cmd: %s", exc)
+            await self.status("error", "youtube: %s" % exc)
+            return
+        log.info("youtube ffmpeg %s", path)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self._radio_proc = proc
+        await self._pump_pcm(proc, pace=True)
+
+    async def _finish_turn(self, pcm: bytes, turn_gen: int):
         if not self.api_key:
-            await self.status("idle", "groq")
+            await self._status_if(turn_gen, "idle", "groq")
             return
         if len(pcm) < 3200:
-            await self.status("idle", "groq: too short")
+            log.info("turn too short bytes=%s gen=%s", len(pcm), turn_gen)
+            await self._status_if(turn_gen, "idle", "groq: too short")
             return
 
-        await self.status("thinking", "groq stt")
+        await self._status_if(turn_gen, "thinking", "groq stt")
         loop = asyncio.get_event_loop()
         try:
             text = await loop.run_in_executor(None, self._transcribe, pcm)
         except Exception as exc:
             log.exception("stt")
-            await self.status("error", "groq stt: %s" % exc)
+            await self._status_if(turn_gen, "error", "groq stt: %s" % exc)
             return
         if not text:
-            await self.status("idle", "groq: empty stt")
+            await self._status_if(turn_gen, "idle", "groq: empty stt")
             return
         log.info("stt: %s", text[:120])
 
         woke, rest = match_wake(text)
         if self._mode == "wake" and not woke:
             log.info("ignore no wake: %s", text[:80])
-            await self.status("idle", "no wake")
+            await self._status_if(turn_gen, "idle", "no wake")
             return
         user_text = rest if woke else text
         if woke and not user_text:
-            await self._speak("Слушаю.", heard=text)
+            await self._speak(turn_gen, "Слушаю.", heard=text)
             return
 
-        await self.status("thinking", "groq llm", heard=user_text)
+        await self._status_if(turn_gen, "thinking", "groq llm", heard=user_text)
         try:
-            reply, cmds = await loop.run_in_executor(None, self._chat, user_text)
+            reply, cmds, radio_err = await loop.run_in_executor(
+                None, self._reply_and_radio, user_text
+            )
         except Exception as exc:
             log.exception("llm")
-            await self.status("error", "groq llm: %s" % exc)
+            await self._status_if(turn_gen, "error", "groq llm: %s" % exc)
             return
-        if not cmds:
-            cmds = heuristic_commands(user_text, self._vol, self._bl)
-        cmds, radio_err = attach_radio_play(cmds, user_text, self._pick_radio)
         if radio_err:
             reply = radio_err
-        if cmds:
-            await self._emit_cmds(cmds)
+        play_cmds = [c for c in cmds if c.get("name") == "radio_play"]
+        other = [c for c in cmds if c.get("name") != "radio_play"]
+        yt_cmd = next(
+            (c for c in play_cmds if youtube.is_youtube_source(c.get("source") or "")),
+            None,
+        )
+        radio_cmd = next(
+            (c for c in play_cmds if not youtube.is_youtube_source(c.get("source") or "")),
+            None,
+        )
+        if other:
+            await self._emit_cmds_if(turn_gen, other)
             if not reply:
-                reply = spoken_ack(cmds)
-        radio_cmd = next((c for c in cmds if c.get("name") == "radio_play"), None)
+                reply = spoken_ack(other)
+        if yt_cmd:
+            await self._status_if(turn_gen, "thinking", "youtube fetch", heard=user_text)
+            ready = await self._prepare_youtube(user_text, yt_cmd)
+            if not ready:
+                await self._speak(
+                    turn_gen,
+                    radio_err or "Не нашла трек. Назовите песню или исполнителя.",
+                    heard=user_text,
+                )
+                return
+            await self._emit_cmds_if(turn_gen, [ready])
+            title = ready.get("title") or "YouTube"
+            source = ready.get("source") or ""
+            self._arm_tts()
+            await self._status_if(turn_gen, "radio", title, heard=user_text, reply=title)
+            stream_gen = self._gen
+            try:
+                await self._stream_radio(source)
+            except Exception as exc:
+                log.exception("youtube stream")
+                if self._gen == stream_gen:
+                    await self._emit_cmds_if(turn_gen, [{"name": "radio_stop"}])
+                    await self._status_if(turn_gen, "error", "youtube: %s" % exc, heard=user_text)
+                return
+            if self._gen == stream_gen:
+                await self._status_if(turn_gen, "idle", "groq")
+            return
         if radio_cmd:
+            await self._emit_cmds_if(turn_gen, [radio_cmd])
+            if not reply:
+                reply = spoken_ack([radio_cmd])
             title = radio_cmd.get("title") or "радио"
             source = radio_cmd.get("source") or ""
             self._arm_tts()
-            await self.status("radio", title, heard=user_text, reply=title)
+            await self._status_if(turn_gen, "radio", title, heard=user_text, reply=title)
             stream_gen = self._gen
-            await self._stream_radio(source)
+            try:
+                await self._stream_radio(source)
+            except Exception as exc:
+                log.exception("radio stream")
+                if self._gen == stream_gen:
+                    await self._emit_cmds_if(turn_gen, [{"name": "radio_stop"}])
+                    await self._status_if(turn_gen, "error", "radio: %s" % exc, heard=user_text)
+                return
             if self._gen == stream_gen:
-                await self.status("idle", "groq")
+                await self._status_if(turn_gen, "idle", "groq")
             return
         if any(c.get("name") == "radio_stop" for c in cmds):
-            await self.status("idle", "groq", heard=user_text, reply=reply or "Радио выключено.")
+            await self._status_if(turn_gen, "idle", "groq", heard=user_text, reply=reply or "Радио выключено.")
             return
         if not reply:
-            await self.status("idle", "groq: empty llm")
+            await self._status_if(turn_gen, "idle", "groq: empty llm")
             return
         log.info("llm: %s", reply[:120])
 
-        await self._speak(reply, heard=user_text)
+        await self._speak(turn_gen, reply, heard=user_text)
 
-    async def _speak(self, reply: str, heard: str = ""):
+    async def _speak(self, turn_gen: int, reply: str, heard: str = ""):
         self._arm_tts()
-        await self.status("speaking", "groq tts", heard=heard, reply=reply)
+        if self._gen != turn_gen:
+            return
+        await self._status_if(turn_gen, "speaking", "groq tts", heard=heard, reply=reply)
         try:
             audio = await self._tts(reply)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             log.exception("tts")
-            await self.status("error", "groq tts: %s" % exc)
+            await self._status_if(turn_gen, "error", "groq tts: %s" % exc)
             return
         if self._pcm_epoch != self._gen:
             return
@@ -326,11 +549,11 @@ class GroqBackend(VoiceBackend):
                 raise
             except Exception as exc:
                 log.warning("tts send failed: %s", exc)
-                await self.status("error", "tts send failed")
+                await self._status_if(turn_gen, "error", "tts send failed")
                 return
         if self._pcm_epoch != self._gen:
             return
-        await self.status("idle", "groq")
+        await self._status_if(turn_gen, "idle", "groq")
 
     async def _emit_cmds(self, cmds):
         cb = getattr(self, "_on_cmd", None)
@@ -407,6 +630,19 @@ class GroqBackend(VoiceBackend):
                 return self._complete(messages, use_tools=False)
             raise RuntimeError("llm HTTP %s %s" % (exc.code, body)) from exc
 
+    def _reply_and_radio(self, user_text: str):
+        reply, cmds = self._chat(user_text)
+        if not cmds:
+            cmds = heuristic_commands(user_text, self._vol, self._bl)
+        last_q = self._yt_last_query or youtube.last_played_query(self.youtube_cfg)
+        cmds, music_err = attach_music_play(
+            cmds, user_text, self._pick_music, last_query=last_q
+        )
+        if music_err:
+            return reply, cmds, music_err
+        cmds, radio_err = attach_radio_play(cmds, user_text, self._pick_radio)
+        return reply, cmds, radio_err
+
     def _chat(self, user_text: str):
         messages = [{"role": "system", "content": _SYSTEM}]
         messages.extend(self._history[-8:])
@@ -428,14 +664,35 @@ class GroqBackend(VoiceBackend):
                 extra, vol, bl = apply_tool(name, args, vol, bl)
                 cmds.extend(extra)
                 tool_body = extra or {"ok": True}
+                if name == "play_radio" and radio_play_query(user_text) is None:
+                    name = "play_music"
+                    if not (args.get("query") or "").strip():
+                        args["query"] = music_play_query(user_text) or user_text
                 if name == "play_radio":
                     picked = self._pick_radio((args.get("query") or user_text or "").strip())
-                    if picked:
+                    if picked and picked.get("url"):
                         extra = [radio.device_play_cmd(picked)]
                         cmds.extend(extra)
-                        tool_body = {"ok": True, "title": extra[0]["title"], "uuid": picked["uuid"]}
+                        tool_body = {"ok": True, "title": extra[0]["title"], "uuid": picked.get("uuid")}
+                    elif picked and picked.get("clarify"):
+                        tool_body = {"ok": False, "ask": picked["clarify"]}
                     else:
                         tool_body = {"ok": False, "error": "no station"}
+                if name == "play_music":
+                    q = (args.get("query") or user_text or "").strip()
+                    if music_next_intent(q) or music_next_intent(user_text):
+                        q = self._yt_last_query or youtube.last_played_query(self.youtube_cfg) or q
+                    picked = self._pick_music(q)
+                    if picked and (picked.get("url") or picked.get("video_id")):
+                        extra = [youtube.device_music_cmd(picked)]
+                        cmds.extend(extra)
+                        tool_body = {
+                            "ok": True,
+                            "title": extra[0]["title"],
+                            "id": picked.get("video_id"),
+                        }
+                    else:
+                        tool_body = {"ok": False, "error": "no track"}
                 messages.append(
                     {
                         "role": "tool",
@@ -456,6 +713,76 @@ class GroqBackend(VoiceBackend):
         self._history.append({"role": "assistant", "content": reply or spoken_ack(cmds)})
         return reply, cmds
 
+    async def _prepare_youtube(self, query, first=None):
+        rows = []
+        if first:
+            source = (first.get("source") or first.get("url") or "").strip()
+            vid = youtube.video_id_from_source(source) or (first.get("video_id") or "")
+            if vid:
+                rows.append(
+                    {
+                        "video_id": vid,
+                        "title": first.get("title") or "YouTube",
+                        "url": source or ("yt://%s" % vid),
+                        "query": query,
+                    }
+                )
+        loop = asyncio.get_event_loop()
+        more = await loop.run_in_executor(
+            None, lambda: list(youtube.iter_track_candidates(query, self.youtube_cfg))
+        )
+        merged = []
+        seen = set()
+        for row in list(more or []) + list(rows):
+            vid = (row.get("video_id") or youtube.video_id_from_source(row.get("url") or "") or "").strip()
+            if not vid or vid in seen:
+                continue
+            seen.add(vid)
+            item = dict(row)
+            item["video_id"] = vid
+            item["url"] = (item.get("url") or ("yt://%s" % vid)).strip()
+            merged.append(item)
+        skip = set(youtube.played_ids(query, self.youtube_cfg))
+        merged = youtube.rank_track_candidates(merged, query, exclude_ids=skip) or youtube.rank_track_candidates(
+            merged, query
+        )
+
+        async def download(row):
+            await self._ensure_youtube_file(row["url"])
+
+        for row in merged[:8]:
+            try:
+                await download(row)
+            except Exception as exc:
+                log.warning("youtube skip %s: %s", row.get("video_id"), exc)
+                continue
+            youtube.remember_played(query, row.get("video_id"), self.youtube_cfg)
+            self._yt_last_query = youtube.strip_service_words(query)
+            log.info(
+                "youtube pick %s %s q=%s",
+                row.get("video_id"),
+                row.get("title"),
+                row.get("query") or query,
+            )
+            return youtube.device_music_cmd(row)
+        return None
+
+    def _pick_music(self, query: str):
+        try:
+            skip = set(youtube.played_ids(query, self.youtube_cfg))
+            picked = youtube.resolve_track(query, self.youtube_cfg, exclude_ids=skip)
+            if picked:
+                log.info(
+                    "youtube search %s %s q=%s",
+                    picked.get("video_id"),
+                    picked.get("title"),
+                    picked.get("query") or query,
+                )
+            return picked
+        except Exception as exc:
+            log.warning("youtube resolve failed: %s", exc)
+            return None
+
     def _pick_radio(self, query: str):
         def picker(q, cands):
             slim = [
@@ -464,6 +791,7 @@ class GroqBackend(VoiceBackend):
                     "name": c["name"],
                     "bitrate": c["bitrate"],
                     "countrycode": c.get("countrycode") or "",
+                    "tags": c.get("tags") or "",
                 }
                 for c in cands
             ]

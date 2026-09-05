@@ -9,6 +9,7 @@ idf_component_register(
                               "./ui/fonts/font_ru_14.c"
                               "./app/app_audio.c"
                               "./app/aec.c"
+                              "./app/afe_aec.c"
                               "./app/app_wifi.c"
                               "./app/app_brain.c"
                               "./mww/mww.cc" 

@@ -24,6 +24,13 @@ idf.py build
 
 Do not commit `firmware/sdkconfig` or `firmware/build/`.
 
+Firmware versioning: bump `firmware/BUILDNUM` (and `KOLONKA_BUILD` in
+`firmware/main/app/app_version.h`) for every image you flash. Bump
+`firmware/VERSION` / `KOLONKA_VERSION_*` when cutting a release entry in
+`CHANGELOG.md`. The Settings tab shows `Прошивка <version>+<build>`.
+Do not name the build-number file `BUILD` — on Windows it collides with
+the ESP-IDF `build/` directory.
+
 ### Gateway
 
 Python 3.11+.
