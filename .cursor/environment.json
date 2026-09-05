@@ -1,0 +1,10 @@
+{
+  "name": "s3-kolonka",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "gateway",
+      "command": "cd gateway && PYTHONPATH=. .venv/bin/python -m s3_kolonka_gw --config config.yaml"
+    }
+  ]
+}
