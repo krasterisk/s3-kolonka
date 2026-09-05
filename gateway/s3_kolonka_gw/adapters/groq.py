@@ -125,7 +125,7 @@ class GroqBackend(VoiceBackend):
         self._buf.clear()
         self._reset_vad()
         log.info("listen mode=%s gen=%s", self._mode, self._gen)
-        await self.status("live", "groq")
+        await self.status("live", "groq", gen=self._gen)
 
     async def send_pcm(self, data: bytes):
         if not self._listening or self._busy or not data:
@@ -174,16 +174,34 @@ class GroqBackend(VoiceBackend):
         self._turn_task = asyncio.create_task(self._run_turn(pcm), name="gw-turn")
 
     async def _run_turn(self, pcm: bytes):
+        turn_gen = self._gen
         try:
-            await self._finish_turn(pcm)
+            await self._finish_turn(pcm, turn_gen)
+        except asyncio.CancelledError:
+            raise
         except Exception:
             log.exception("turn failed")
-            try:
-                await self.status("error", "turn failed")
-            except Exception:
-                pass
+            if self._gen == turn_gen:
+                try:
+                    await self.status("error", "turn failed", gen=turn_gen)
+                except Exception:
+                    pass
         finally:
+            # Always clear: listen() may have bumped _gen while cancelling us.
             self._busy = False
+
+    async def _status_if(self, turn_gen: int, state: str, detail: str = "", **kwargs):
+        if self._gen != turn_gen:
+            return False
+        # Pin turn_gen on the wire. Reading self._gen inside on_status after an
+        # await would mis-label a late idle with the newer listen generation.
+        await self.status(state, detail, gen=turn_gen, **kwargs)
+        return True
+
+    async def _emit_cmds_if(self, turn_gen: int, cmds):
+        if self._gen != turn_gen:
+            return
+        await self._emit_cmds(cmds)
 
     async def close(self):
         self._pcm_epoch = -1
@@ -328,45 +346,45 @@ class GroqBackend(VoiceBackend):
         self._radio_proc = proc
         await self._pump_pcm(proc, pace=True)
 
-    async def _finish_turn(self, pcm: bytes):
+    async def _finish_turn(self, pcm: bytes, turn_gen: int):
         if not self.api_key:
-            await self.status("idle", "groq")
+            await self._status_if(turn_gen, "idle", "groq")
             return
         if len(pcm) < 3200:
-            await self.status("idle", "groq: too short")
+            await self._status_if(turn_gen, "idle", "groq: too short")
             return
 
-        await self.status("thinking", "groq stt")
+        await self._status_if(turn_gen, "thinking", "groq stt")
         loop = asyncio.get_event_loop()
         try:
             text = await loop.run_in_executor(None, self._transcribe, pcm)
         except Exception as exc:
             log.exception("stt")
-            await self.status("error", "groq stt: %s" % exc)
+            await self._status_if(turn_gen, "error", "groq stt: %s" % exc)
             return
         if not text:
-            await self.status("idle", "groq: empty stt")
+            await self._status_if(turn_gen, "idle", "groq: empty stt")
             return
         log.info("stt: %s", text[:120])
 
         woke, rest = match_wake(text)
         if self._mode == "wake" and not woke:
             log.info("ignore no wake: %s", text[:80])
-            await self.status("idle", "no wake")
+            await self._status_if(turn_gen, "idle", "no wake")
             return
         user_text = rest if woke else text
         if woke and not user_text:
-            await self._speak("Слушаю.", heard=text)
+            await self._speak(turn_gen, "Слушаю.", heard=text)
             return
 
-        await self.status("thinking", "groq llm", heard=user_text)
+        await self._status_if(turn_gen, "thinking", "groq llm", heard=user_text)
         try:
             reply, cmds, radio_err = await loop.run_in_executor(
                 None, self._reply_and_radio, user_text
             )
         except Exception as exc:
             log.exception("llm")
-            await self.status("error", "groq llm: %s" % exc)
+            await self._status_if(turn_gen, "error", "groq llm: %s" % exc)
             return
         if radio_err:
             reply = radio_err
@@ -381,75 +399,78 @@ class GroqBackend(VoiceBackend):
             None,
         )
         if other:
-            await self._emit_cmds(other)
+            await self._emit_cmds_if(turn_gen, other)
             if not reply:
                 reply = spoken_ack(other)
         if yt_cmd:
-            await self.status("thinking", "youtube fetch", heard=user_text)
+            await self._status_if(turn_gen, "thinking", "youtube fetch", heard=user_text)
             ready = await self._prepare_youtube(user_text, yt_cmd)
             if not ready:
                 await self._speak(
+                    turn_gen,
                     radio_err or "Не нашла трек. Назовите песню или исполнителя.",
                     heard=user_text,
                 )
                 return
-            await self._emit_cmds([ready])
+            await self._emit_cmds_if(turn_gen, [ready])
             title = ready.get("title") or "YouTube"
             source = ready.get("source") or ""
             self._arm_tts()
-            await self.status("radio", title, heard=user_text, reply=title)
+            await self._status_if(turn_gen, "radio", title, heard=user_text, reply=title)
             stream_gen = self._gen
             try:
                 await self._stream_radio(source)
             except Exception as exc:
                 log.exception("youtube stream")
                 if self._gen == stream_gen:
-                    await self._emit_cmds([{"name": "radio_stop"}])
-                    await self.status("error", "youtube: %s" % exc, heard=user_text)
+                    await self._emit_cmds_if(turn_gen, [{"name": "radio_stop"}])
+                    await self._status_if(turn_gen, "error", "youtube: %s" % exc, heard=user_text)
                 return
             if self._gen == stream_gen:
-                await self.status("idle", "groq")
+                await self._status_if(turn_gen, "idle", "groq")
             return
         if radio_cmd:
-            await self._emit_cmds([radio_cmd])
+            await self._emit_cmds_if(turn_gen, [radio_cmd])
             if not reply:
                 reply = spoken_ack([radio_cmd])
             title = radio_cmd.get("title") or "радио"
             source = radio_cmd.get("source") or ""
             self._arm_tts()
-            await self.status("radio", title, heard=user_text, reply=title)
+            await self._status_if(turn_gen, "radio", title, heard=user_text, reply=title)
             stream_gen = self._gen
             try:
                 await self._stream_radio(source)
             except Exception as exc:
                 log.exception("radio stream")
                 if self._gen == stream_gen:
-                    await self._emit_cmds([{"name": "radio_stop"}])
-                    await self.status("error", "radio: %s" % exc, heard=user_text)
+                    await self._emit_cmds_if(turn_gen, [{"name": "radio_stop"}])
+                    await self._status_if(turn_gen, "error", "radio: %s" % exc, heard=user_text)
                 return
             if self._gen == stream_gen:
-                await self.status("idle", "groq")
+                await self._status_if(turn_gen, "idle", "groq")
             return
         if any(c.get("name") == "radio_stop" for c in cmds):
-            await self.status("idle", "groq", heard=user_text, reply=reply or "Радио выключено.")
+            await self._status_if(turn_gen, "idle", "groq", heard=user_text, reply=reply or "Радио выключено.")
             return
         if not reply:
-            await self.status("idle", "groq: empty llm")
+            await self._status_if(turn_gen, "idle", "groq: empty llm")
             return
         log.info("llm: %s", reply[:120])
 
-        await self._speak(reply, heard=user_text)
+        await self._speak(turn_gen, reply, heard=user_text)
 
-    async def _speak(self, reply: str, heard: str = ""):
+    async def _speak(self, turn_gen: int, reply: str, heard: str = ""):
         self._arm_tts()
-        await self.status("speaking", "groq tts", heard=heard, reply=reply)
+        if self._gen != turn_gen:
+            return
+        await self._status_if(turn_gen, "speaking", "groq tts", heard=heard, reply=reply)
         try:
             audio = await self._tts(reply)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             log.exception("tts")
-            await self.status("error", "groq tts: %s" % exc)
+            await self._status_if(turn_gen, "error", "groq tts: %s" % exc)
             return
         if self._pcm_epoch != self._gen:
             return
@@ -466,11 +487,11 @@ class GroqBackend(VoiceBackend):
                 raise
             except Exception as exc:
                 log.warning("tts send failed: %s", exc)
-                await self.status("error", "tts send failed")
+                await self._status_if(turn_gen, "error", "tts send failed")
                 return
         if self._pcm_epoch != self._gen:
             return
-        await self.status("idle", "groq")
+        await self._status_if(turn_gen, "idle", "groq")
 
     async def _emit_cmds(self, cmds):
         cb = getattr(self, "_on_cmd", None)

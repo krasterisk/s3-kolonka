@@ -91,6 +91,27 @@ class BrainTransportConfigTest(unittest.TestCase):
         self.assertIn("ignore radio_play while listening", ui)
         self.assertIn("app_audio_is_listening()", ui)
 
+    def test_listen_ignores_stale_end_status(self):
+        """Late idle/thinking from the previous turn must not wipe a new listen
+        (that flashed «Слушаю» → «Готов» with no speech)."""
+        self.assertIn("s_listen_protect_until", BRAIN)
+        self.assertIn("s_status_gen", BRAIN)
+        self.assertIn('cJSON_GetObjectItem(root, "gen")', BRAIN)
+        set_listen = re.search(
+            r"void app_brain_set_listen\(bool on\)\s*\{(.*?)^\}",
+            BRAIN,
+            re.DOTALL | re.MULTILINE,
+        )
+        self.assertIsNotNone(set_listen)
+        self.assertIn("s_listen_protect_until", set_listen.group(1))
+        end = re.search(
+            r"if \(s_end_listen\) \{(.*?)if \(s_listen != s_listen_sent\)",
+            BRAIN,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(end)
+        self.assertIn("protect", end.group(1))
+
 
 if __name__ == "__main__":
     unittest.main()

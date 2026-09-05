@@ -41,6 +41,11 @@ static volatile bool s_cmd_ready;
 static volatile bool s_skip_idle;
 static volatile bool s_radio_stop_pending;
 static bool s_listen_sent;
+/* Ignore end-listen from stale status (idle/thinking from the previous turn)
+ * that arrives just after the user opens a new listen — otherwise UI flashes
+ * «Слушаю» → «Готов» with no speech captured. */
+static TickType_t s_listen_protect_until;
+static int s_status_gen = -1;
 static char s_status[48] = "Brain: wait";
 static char s_backend[16] = "gw";
 static char s_heard[256];
@@ -240,14 +245,34 @@ static void handle_text(const char *data, int len)
                 }
                 app_audio_radio_stop();
             }
+            const cJSON *gen_j = cJSON_GetObjectItem(root, "gen");
+            int msg_gen = cJSON_IsNumber(gen_j) ? (int)gen_j->valuedouble : -1;
+            if (strcmp(st, "live") == 0) {
+                /* New listen session: arm protect and bind to this gen. */
+                s_skip_idle = true;
+                s_listen_protect_until =
+                    xTaskGetTickCount() + pdMS_TO_TICKS(3000);
+                if (msg_gen >= 0) {
+                    s_status_gen = msg_gen;
+                }
+            }
+            bool stale_gen =
+                (s_status_gen >= 0 && msg_gen >= 0 && msg_gen != s_status_gen);
+            bool listen_protect =
+                (s_listen_protect_until != 0 &&
+                 xTaskGetTickCount() < s_listen_protect_until);
             if (strcmp(st, "thinking") == 0 || strcmp(st, "speaking") == 0 ||
                 strcmp(st, "error") == 0 || strcmp(st, "radio") == 0) {
-                s_end_listen = true;
+                if (!stale_gen && !listen_protect) {
+                    s_end_listen = true;
+                    s_listen_protect_until = 0;
+                }
             } else if (strcmp(st, "idle") == 0) {
                 if (s_skip_idle) {
                     s_skip_idle = false;
-                } else {
+                } else if (!stale_gen && !listen_protect) {
                     s_end_listen = true;
+                    s_listen_protect_until = 0;
                 }
             }
         } else if (strcmp(type->valuestring, "cmd") == 0) {
@@ -529,15 +554,25 @@ static void brain_task(void *arg)
         }
         if (s_end_listen) {
             s_end_listen = false;
-            s_listen = false;
-            app_audio_set_listen(false);
+            /* A stale idle/thinking from the previous turn can arrive in the
+             * same loop as a brand-new listen — do not wipe it during protect. */
+            bool protect = (s_listen_protect_until != 0 &&
+                            xTaskGetTickCount() < s_listen_protect_until);
+            if (!protect) {
+                s_listen = false;
+                app_audio_set_listen(false);
+            }
         }
         if (s_listen != s_listen_sent) {
             s_listen_sent = s_listen;
             if (!s_listen) {
                 flush_uplink();
+                s_listen_protect_until = 0;
             }
             if (s_listen) {
+                s_skip_idle = true;
+                s_listen_protect_until =
+                    xTaskGetTickCount() + pdMS_TO_TICKS(3000);
                 request_abort_play();
                 app_audio_radio_stop();
                 send_json(s_wake_mode ? "{\"type\":\"listen\",\"mode\":\"wake\"}"
@@ -593,6 +628,12 @@ void app_brain_set_listen(bool on)
 {
     if (on) {
         clear_turn_text();
+        /* Arm before brain_task runs so a stale idle in the same tick cannot
+         * clear s_listen before the listen JSON is sent. */
+        s_skip_idle = true;
+        s_listen_protect_until = xTaskGetTickCount() + pdMS_TO_TICKS(3000);
+    } else {
+        s_listen_protect_until = 0;
     }
     s_listen = on;
 }

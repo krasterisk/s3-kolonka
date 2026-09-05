@@ -10,7 +10,7 @@ class SlowTurn(GroqBackend):
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def _finish_turn(self, pcm: bytes):
+    async def _finish_turn(self, pcm: bytes, turn_gen: int):
         self.started.set()
         await self.release.wait()
 
@@ -30,8 +30,8 @@ class SpeakChunks(GroqBackend):
 
         await super().start(capture, on_status)
 
-    async def _finish_turn(self, pcm: bytes):
-        await self._speak("hello", heard="hi")
+    async def _finish_turn(self, pcm: bytes, turn_gen: int):
+        await self._speak(turn_gen, "hello", heard="hi")
 
     async def _tts(self, text: str) -> bytes:
         return b"\x00" * (3200 * 20)
@@ -40,6 +40,11 @@ class SpeakChunks(GroqBackend):
 class TurnAsyncTest(unittest.IsolatedAsyncioTestCase):
     async def test_stop_returns_before_pipeline_finishes(self):
         backend = SlowTurn()
+
+        async def on_status(state, detail="", heard="", reply="", gen=None):
+            return None
+
+        await backend.start(lambda _d: None, on_status)
         await backend.listen()
         await backend.send_pcm(b"\x00\x00" * 2000)
 
@@ -58,7 +63,7 @@ class TurnAsyncTest(unittest.IsolatedAsyncioTestCase):
         async def on_pcm(data):
             chunks.append(data)
 
-        async def on_status(state, detail="", heard="", reply=""):
+        async def on_status(state, detail="", heard="", reply="", gen=None):
             return None
 
         await backend.start(on_pcm, on_status)
@@ -80,7 +85,7 @@ class TurnAsyncTest(unittest.IsolatedAsyncioTestCase):
         async def on_pcm(data):
             silent.append(data)
 
-        async def on_status(state, detail="", heard="", reply=""):
+        async def on_status(state, detail="", heard="", reply="", gen=None):
             return None
 
         backend = SpeakChunks()
@@ -103,9 +108,15 @@ class PrepareYoutubeTest(unittest.IsolatedAsyncioTestCase):
 
         from s3_kolonka_gw import youtube as yt
 
+        cache = Path("/tmp/s3-kolonka-yt-test")
+        cache.mkdir(parents=True, exist_ok=True)
+        played = cache / "played.json"
+        if played.exists():
+            played.unlink()
+
         backend = GroqBackend(
             {"api_key": "test"},
-            youtube_cfg={"cache_dir": "/tmp/s3-kolonka-yt-test"},
+            youtube_cfg={"cache_dir": str(cache)},
         )
         first = {"source": "yt://peDON2N4CoQ", "title": "ТУТХАМОН", "video_id": "peDON2N4CoQ"}
         tried = []

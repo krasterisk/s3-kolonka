@@ -17,6 +17,58 @@ class StatusPayloadTest(unittest.TestCase):
         self.assertNotIn("heard", msg)
         self.assertNotIn("reply", msg)
 
+    def test_includes_gen_when_set(self):
+        msg = status_payload("live", "groq", gen=3)
+        self.assertEqual(msg["gen"], 3)
+        self.assertNotIn("gen", status_payload("idle", "groq"))
+
+
+class StatusGenPinTest(unittest.IsolatedAsyncioTestCase):
+    async def test_status_if_pins_turn_gen_after_listen_bump(self):
+        """Late idle from turn N must keep gen=N even if listen bumped _gen."""
+        backend = GroqBackend({"api_key": "test"})
+        payloads = []
+
+        async def on_status(state, detail="", heard="", reply="", gen=None):
+            if gen is None:
+                gen = backend._gen
+            payloads.append(status_payload(state, detail, heard, reply, gen=gen))
+
+        await backend.start(lambda _d: None, on_status)
+        backend._gen = 4
+        # Simulate TOCTOU: listen() already bumped gen before status send.
+        backend._gen = 5
+        await backend.status("idle", "groq", gen=4)
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0]["state"], "idle")
+        self.assertEqual(payloads[0]["gen"], 4)
+
+    async def test_status_if_skips_when_gen_mismatches(self):
+        backend = GroqBackend({"api_key": "test"})
+        payloads = []
+
+        async def on_status(state, detail="", heard="", reply="", gen=None):
+            payloads.append(state)
+
+        await backend.start(lambda _d: None, on_status)
+        backend._gen = 2
+        ok = await backend._status_if(1, "idle", "stale")
+        self.assertFalse(ok)
+        self.assertEqual(payloads, [])
+
+    async def test_status_if_forwards_pinned_gen(self):
+        backend = GroqBackend({"api_key": "test"})
+        payloads = []
+
+        async def on_status(state, detail="", heard="", reply="", gen=None):
+            payloads.append(gen)
+
+        await backend.start(lambda _d: None, on_status)
+        backend._gen = 7
+        ok = await backend._status_if(7, "thinking", "stt")
+        self.assertTrue(ok)
+        self.assertEqual(payloads, [7])
+
 
 class ListenOrphanTest(unittest.TestCase):
     def test_stash_ignores_short_clip(self):

@@ -44,12 +44,14 @@ def pop_listen_orphan(store, host, now=None):
     return row
 
 
-def status_payload(state: str, detail: str = "", heard: str = "", reply: str = "") -> dict:
+def status_payload(state: str, detail: str = "", heard: str = "", reply: str = "", gen: int | None = None) -> dict:
     msg = {"type": "status", "state": state, "detail": detail}
     if heard:
         msg["heard"] = heard
     if reply:
         msg["reply"] = reply
+    if gen is not None:
+        msg["gen"] = int(gen)
     return msg
 
 
@@ -84,9 +86,30 @@ async def session(ws, path, cfg):
     async def on_pcm(data: bytes):
         await ws.send(data)
 
-    async def on_status(state: str, detail: str = "", heard: str = "", reply: str = ""):
+    async def on_status(
+        state: str,
+        detail: str = "",
+        heard: str = "",
+        reply: str = "",
+        gen: int | None = None,
+    ):
+        # Prefer the caller's pinned gen (turn_gen). Falling back to live
+        # backend._gen re-introduces the race where a late idle is labeled
+        # with the new listen gen and the speaker ends «Слушаю» immediately.
+        if gen is None:
+            gen = getattr(backend, "_gen", None)
         try:
-            await ws.send(json.dumps(status_payload(state, detail, heard, reply)))
+            await ws.send(
+                json.dumps(
+                    status_payload(
+                        state,
+                        detail,
+                        heard,
+                        reply,
+                        gen=gen,
+                    )
+                )
+            )
         except Exception as exc:
             log.warning("status send failed: %s", exc)
 
