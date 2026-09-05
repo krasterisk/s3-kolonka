@@ -92,11 +92,23 @@ class BrainTransportConfigTest(unittest.TestCase):
         self.assertIn("app_audio_is_listening()", ui)
 
     def test_listen_ignores_stale_end_status(self):
-        """Late idle/thinking from the previous turn must not wipe a new listen
-        (that flashed «Слушаю» → «Готов» with no speech)."""
+        """Late idle from the previous turn must not wipe a new listen.
+        Protect must stay idle-only: blocking thinking/speaking left s_listen
+        stuck and muted wake (maybe_wake bails while listening)."""
         self.assertIn("s_listen_protect_until", BRAIN)
         self.assertIn("s_status_gen", BRAIN)
         self.assertIn('cJSON_GetObjectItem(root, "gen")', BRAIN)
+        self.assertIn("idle_protect", BRAIN)
+        self.assertIn("pdMS_TO_TICKS(800)", BRAIN)
+        # thinking/speaking end listen on stale_gen alone — not behind protect
+        block = re.search(
+            r'strcmp\(st, "thinking"\).*?else if \(strcmp\(st, "idle"\)',
+            BRAIN,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(block)
+        self.assertIn("!stale_gen", block.group(0))
+        self.assertNotIn("idle_protect", block.group(0).split("idle")[0])
         set_listen = re.search(
             r"void app_brain_set_listen\(bool on\)\s*\{(.*?)^\}",
             BRAIN,
@@ -110,7 +122,7 @@ class BrainTransportConfigTest(unittest.TestCase):
             re.DOTALL,
         )
         self.assertIsNotNone(end)
-        self.assertIn("protect", end.group(1))
+        self.assertIn("idle_protect", end.group(1))
 
 
 if __name__ == "__main__":

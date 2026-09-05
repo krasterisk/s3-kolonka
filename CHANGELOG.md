@@ -39,8 +39,9 @@ and this project uses [Semantic Versioning](https://semver.org/) after 1.0.0.
 - Microphone PCM uses 20 ms frames and a 5 s network-write budget; its dedicated TX task no longer sleeps after every frame and throttles the 32 KB/s uplink
 - Brain WebSocket keeps one client with auto-reconnect; it no longer destroys mid-handshake (that caused the open→drop reconnect loop)
 - Listen clears sticky `pcm://` radio state so «Слушаю» is not muted after a failed/cancelled YouTube play
-- A new listen ignores stale idle/thinking from the previous turn (status `gen` + short protect window) so the UI does not flash «Слушаю» → «Готов»
+- A new listen ignores a stale idle from the previous turn (status `gen` + short idle-only protect) so the UI does not flash «Слушаю» → «Готов»
 - Gateway pins the turn `gen` on status messages so a late idle cannot be re-labeled with the newer listen generation
+- Listen protect no longer blocks `thinking`/`speaking` (that left listen stuck and silenced the wake word)
 
 ## [0.1.0] - 2026-09-03
 

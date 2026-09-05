@@ -41,9 +41,10 @@ static volatile bool s_cmd_ready;
 static volatile bool s_skip_idle;
 static volatile bool s_radio_stop_pending;
 static bool s_listen_sent;
-/* Ignore end-listen from stale status (idle/thinking from the previous turn)
- * that arrives just after the user opens a new listen — otherwise UI flashes
- * «Слушаю» → «Готов» with no speech captured. */
+/* Ignore end-listen from a stale idle that races a brand-new listen — otherwise
+ * the UI flashes «Слушаю» → «Готов» with no speech. thinking/speaking still end
+ * listen immediately (stale gen only); a long protect muted wake by leaving
+ * s_listen stuck. */
 static TickType_t s_listen_protect_until;
 static int s_status_gen = -1;
 static char s_status[48] = "Brain: wait";
@@ -248,29 +249,33 @@ static void handle_text(const char *data, int len)
             const cJSON *gen_j = cJSON_GetObjectItem(root, "gen");
             int msg_gen = cJSON_IsNumber(gen_j) ? (int)gen_j->valuedouble : -1;
             if (strcmp(st, "live") == 0) {
-                /* New listen session: arm protect and bind to this gen. */
+                /* New listen session: bind gen; idle-protect only (see below). */
                 s_skip_idle = true;
                 s_listen_protect_until =
-                    xTaskGetTickCount() + pdMS_TO_TICKS(3000);
+                    xTaskGetTickCount() + pdMS_TO_TICKS(800);
                 if (msg_gen >= 0) {
                     s_status_gen = msg_gen;
                 }
             }
             bool stale_gen =
                 (s_status_gen >= 0 && msg_gen >= 0 && msg_gen != s_status_gen);
-            bool listen_protect =
+            bool idle_protect =
                 (s_listen_protect_until != 0 &&
                  xTaskGetTickCount() < s_listen_protect_until);
+            /* thinking/speaking/error/radio must end listen even inside the
+             * short window — blocking them left s_listen stuck, which muted
+             * wake (maybe_wake bails while listening) and made the next tap
+             * flash «Слушаю»→«Готов». Stale gen still drops old-turn noise. */
             if (strcmp(st, "thinking") == 0 || strcmp(st, "speaking") == 0 ||
                 strcmp(st, "error") == 0 || strcmp(st, "radio") == 0) {
-                if (!stale_gen && !listen_protect) {
+                if (!stale_gen) {
                     s_end_listen = true;
                     s_listen_protect_until = 0;
                 }
             } else if (strcmp(st, "idle") == 0) {
                 if (s_skip_idle) {
                     s_skip_idle = false;
-                } else if (!stale_gen && !listen_protect) {
+                } else if (!stale_gen && !idle_protect) {
                     s_end_listen = true;
                     s_listen_protect_until = 0;
                 }
@@ -554,11 +559,11 @@ static void brain_task(void *arg)
         }
         if (s_end_listen) {
             s_end_listen = false;
-            /* A stale idle/thinking from the previous turn can arrive in the
-             * same loop as a brand-new listen — do not wipe it during protect. */
-            bool protect = (s_listen_protect_until != 0 &&
-                            xTaskGetTickCount() < s_listen_protect_until);
-            if (!protect) {
+            /* Only a stale idle is deferred by idle-protect. thinking/speaking
+             * clear protect when they set s_end_listen, so wake can resume. */
+            bool idle_protect = (s_listen_protect_until != 0 &&
+                                 xTaskGetTickCount() < s_listen_protect_until);
+            if (!idle_protect) {
                 s_listen = false;
                 app_audio_set_listen(false);
             }
@@ -571,8 +576,10 @@ static void brain_task(void *arg)
             }
             if (s_listen) {
                 s_skip_idle = true;
+                /* Short idle-only shield against a late idle racing the listen
+                 * JSON. Must stay short so a real turn can end listen. */
                 s_listen_protect_until =
-                    xTaskGetTickCount() + pdMS_TO_TICKS(3000);
+                    xTaskGetTickCount() + pdMS_TO_TICKS(800);
                 request_abort_play();
                 app_audio_radio_stop();
                 send_json(s_wake_mode ? "{\"type\":\"listen\",\"mode\":\"wake\"}"
@@ -628,10 +635,10 @@ void app_brain_set_listen(bool on)
 {
     if (on) {
         clear_turn_text();
-        /* Arm before brain_task runs so a stale idle in the same tick cannot
-         * clear s_listen before the listen JSON is sent. */
+        /* Arm idle-protect before brain_task runs so a stale idle in the same
+         * tick cannot clear s_listen before the listen JSON is sent. */
         s_skip_idle = true;
-        s_listen_protect_until = xTaskGetTickCount() + pdMS_TO_TICKS(3000);
+        s_listen_protect_until = xTaskGetTickCount() + pdMS_TO_TICKS(800);
     } else {
         s_listen_protect_until = 0;
     }
