@@ -48,6 +48,25 @@ class BrainTransportConfigTest(unittest.TestCase):
         self.assertIsNotNone(radio_stop)
         self.assertNotIn("send_json(", radio_stop.group(1))
 
+    def test_websocket_lifecycle_waits_for_handshake(self):
+        """Immediate destroy while !is_connected aborts TCP mid-handshake and
+        reconnect-loops (~80 ms open→drop on the gateway)."""
+        self.assertIn(".disable_auto_reconnect = false", BRAIN)
+        offline = re.search(
+            r"if \(!esp_websocket_client_is_connected\(s_ws\)\) \{(.*?)continue;\n\s*\}",
+            BRAIN,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(offline)
+        body = offline.group(1)
+        self.assertIn("wait_ticks", body)
+        self.assertIn("pdMS_TO_TICKS(500)", body)
+        # destroy only after the stuck-offline timeout, not on every poll
+        destroy_calls = re.findall(r"brain_destroy\(\)", body)
+        self.assertEqual(len(destroy_calls), 1)
+        self.assertIn("wait_ticks >= 24", body)
+        self.assertNotIn("s_ws_dead ||", BRAIN)
+
 
 if __name__ == "__main__":
     unittest.main()

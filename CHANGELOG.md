@@ -37,6 +37,7 @@ and this project uses [Semantic Versioning](https://semver.org/) after 1.0.0.
 - Speaker WebSocket no longer parses JSON or stops I2S inside the RX callback; `esp_websocket_client` is 1.7+ (IDFGH-13387)
 - `brain_task` is the only task that writes to the socket, so the client keeps its single default lock; the build fails if the separate TX lock is switched on
 - Microphone PCM uses 20 ms frames and a 5 s network-write budget; its dedicated TX task no longer sleeps after every frame and throttles the 32 KB/s uplink
+- Brain WebSocket keeps one client with auto-reconnect; it no longer destroys mid-handshake (that caused the open→drop reconnect loop)
 
 ## [0.1.0] - 2026-09-03
 

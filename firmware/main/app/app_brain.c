@@ -300,6 +300,7 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "connected");
         set_status("Brain: online");
+        s_ws_dead = false;
         s_need_hello = true;
         s_listen_sent = false;
         s_skip_idle = true;
@@ -443,7 +444,9 @@ static void brain_task(void *arg)
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                      brain_uri());
             /* Pin WS RX next to LWIP (core 0), above afe_feed (prio 4).
-             * task_core_id is ignored unless task_core_id_set is true (1.7+). */
+             * task_core_id is ignored unless task_core_id_set is true (1.7+).
+             * Keep one client: destroy() mid-handshake aborts TCP without a
+             * close frame (~80 ms on the gateway) and reconnect-loops. */
             esp_websocket_client_config_t cfg = {
                 .uri = s_brain_uri,
                 .host = BRAIN_HOST,
@@ -457,7 +460,7 @@ static void brain_task(void *arg)
                 .task_core_id_set = true,
                 .network_timeout_ms = 60000,
                 .reconnect_timeout_ms = 3000,
-                .disable_auto_reconnect = true,
+                .disable_auto_reconnect = false,
                 .ping_interval_sec = 15,
                 .pingpong_timeout_sec = 90,
             };
@@ -485,20 +488,29 @@ static void brain_task(void *arg)
             continue;
         }
 
-        if (s_ws_dead || !esp_websocket_client_is_connected(s_ws)) {
+        if (!esp_websocket_client_is_connected(s_ws)) {
             if (s_end_listen) {
                 s_end_listen = false;
                 s_listen = false;
                 app_audio_set_listen(false);
             }
-            drain_text();
-            flush_uplink();
-            flush_text();
+            if (s_ws_dead) {
+                /* One-shot cleanup after ERROR/DISCONNECTED; do not tear down
+                 * the client — auto-reconnect owns the transport. */
+                drain_text();
+                flush_uplink();
+                flush_text();
+                s_ws_dead = false;
+            }
             set_status("Brain: connecting");
-            s_ws_dead = false;
-            brain_destroy();
-            wait_ticks = 0;
-            vTaskDelay(pdMS_TO_TICKS(200));
+            /* ~12 s of offline before a full recreate (was immediate destroy). */
+            if (++wait_ticks >= 24) {
+                ESP_LOGW(TAG, "ws stuck offline, recreate");
+                set_status("Brain: retry");
+                brain_destroy();
+                wait_ticks = 0;
+            }
+            vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
 
