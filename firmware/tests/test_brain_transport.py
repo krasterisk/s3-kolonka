@@ -100,15 +100,19 @@ class BrainTransportConfigTest(unittest.TestCase):
         self.assertIn('cJSON_GetObjectItem(root, "gen")', BRAIN)
         self.assertIn("idle_protect", BRAIN)
         self.assertIn("pdMS_TO_TICKS(800)", BRAIN)
-        # thinking/speaking end listen on stale_gen alone — not behind protect
-        block = re.search(
-            r'strcmp\(st, "thinking"\).*?else if \(strcmp\(st, "idle"\)',
+        # End-listen decision: thinking/speaking use stale_gen only.
+        end_status = re.search(
+            r'bool stale_gen =.*?else if \(strcmp\(st, "idle"\) == 0\) \{(.*?)\}',
             BRAIN,
             re.DOTALL,
         )
-        self.assertIsNotNone(block)
-        self.assertIn("!stale_gen", block.group(0))
-        self.assertNotIn("idle_protect", block.group(0).split("idle")[0])
+        self.assertIsNotNone(end_status)
+        thinking_arm = end_status.group(0).split('strcmp(st, "idle")')[0]
+        self.assertIn("!stale_gen", thinking_arm)
+        self.assertIn('strcmp(st, "thinking")', thinking_arm)
+        self.assertIn('strcmp(st, "speaking")', thinking_arm)
+        self.assertNotIn("idle_protect", thinking_arm)
+        self.assertIn("idle_protect", end_status.group(1))
         set_listen = re.search(
             r"void app_brain_set_listen\(bool on\)\s*\{(.*?)^\}",
             BRAIN,
