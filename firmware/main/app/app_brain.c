@@ -21,7 +21,7 @@
 
 #define BRAIN_HOST CONFIG_KOLONKA_BRAIN_HOST
 #define BRAIN_PORT CONFIG_KOLONKA_BRAIN_PORT
-#define UPLINK_CHUNK 320
+#define UPLINK_CHUNK 640
 
 static const char *TAG = "brain";
 static esp_websocket_client_handle_t s_ws;
@@ -31,6 +31,7 @@ static volatile bool s_end_listen;
 static volatile bool s_wake_mode;
 static volatile bool s_cmd_ready;
 static volatile bool s_skip_idle;
+static volatile bool s_radio_stop_pending;
 static bool s_listen_sent;
 static char s_status[48] = "Brain: wait";
 static char s_backend[16] = "gw";
@@ -113,13 +114,14 @@ static int send_uplink(const uint8_t *data, int n)
             take = UPLINK_CHUNK;
         }
         int sent = esp_websocket_client_send_bin(
-            s_ws, (const char *)(data + off), take, pdMS_TO_TICKS(200));
+            s_ws, (const char *)(data + off), take, pdMS_TO_TICKS(5000));
         if (sent < 0) {
             return sent;
         }
         off += take;
-        /* Yield so LWIP/Wi-Fi on core 0 can ACK and pong; a burst drops TCP. */
-        vTaskDelay(1);
+        /* The mic ring and TCP write provide backpressure. A timed delay here
+         * throttles raw PCM below real time when the FreeRTOS tick is 100 Hz. */
+        taskYIELD();
     }
     return off;
 }
@@ -498,6 +500,10 @@ static void brain_task(void *arg)
             s_need_hello = false;
             send_json("{\"type\":\"hello\",\"device\":\"s3-kolonka\"}");
         }
+        if (s_radio_stop_pending) {
+            s_radio_stop_pending = false;
+            send_json("{\"type\":\"radio_stop\"}");
+        }
         if (s_end_listen) {
             s_end_listen = false;
             s_listen = false;
@@ -583,7 +589,8 @@ void app_brain_radio_stop(void)
     request_abort_play();
     app_audio_radio_stop();
     clear_turn_text();
-    send_json("{\"type\":\"radio_stop\"}");
+    /* brain_task is the sole application owner of WebSocket TX. */
+    s_radio_stop_pending = true;
 }
 
 bool app_brain_take_cmd(char *name, int name_len, int *value)

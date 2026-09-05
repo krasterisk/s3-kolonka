@@ -12,6 +12,11 @@ menu "s3-kolonka"
         default 8765
         range 1 65535
 
+    config KOLONKA_FULL_DUPLEX_WS
+        bool
+        default y
+        select ESP_WS_CLIENT_SEPARATE_TX_LOCK
+
     config LV_MEM_SIZE_KILOBYTES
         int "Size of the memory used by lv_mem_alloc in kilobytes (>= 2kB)"
         default 48
