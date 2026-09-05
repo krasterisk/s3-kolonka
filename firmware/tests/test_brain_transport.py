@@ -155,22 +155,27 @@ class BrainTransportConfigTest(unittest.TestCase):
 
 
 
-    def test_listen_blocks_playback_pcm_and_survives_disconnect(self):
-        """After YouTube, in-flight PCM + WS blips must not mute/kill listen.
-        Pattern from xiaozhi-esp32: wait for playback idle before voice uplink;
-        do not end listening on transport disconnect alone."""
+    def test_listen_blocks_playback_pcm_and_ends_on_disconnect(self):
+        """After YouTube, in-flight PCM must not re-arm DAC during listen.
+        Disconnect must END listen so wake works — sticky listen (+5) muted
+        maybe_wake until the 12s audio timeout."""
         self.assertIn("s_accept_play && !s_listen", BRAIN)
-        self.assertIn("Keep s_listen", BRAIN)
         self.assertIn("uplink while playing", BRAIN)
         self.assertIn("flush_play();", BRAIN)
-        # Disconnect must not set s_end_listen anymore
         disc = re.search(
             r"WEBSOCKET_EVENT_DISCONNECTED:(.*?)WEBSOCKET_EVENT_DATA",
             BRAIN,
             re.DOTALL,
         )
         self.assertIsNotNone(disc)
-        self.assertNotIn("s_end_listen = true", disc.group(1))
+        self.assertIn("s_end_listen = true", disc.group(1))
+        err = re.search(
+            r"WEBSOCKET_EVENT_ERROR:(.*?)default:",
+            BRAIN,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(err)
+        self.assertIn("s_end_listen = true", err.group(1))
         audio = (FIRMWARE / "main/app/app_audio.c").read_text(encoding="utf-8")
         self.assertIn("Listen also wins over sticky s_playing", audio)
 

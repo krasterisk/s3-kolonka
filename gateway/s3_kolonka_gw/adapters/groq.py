@@ -206,14 +206,11 @@ class GroqBackend(VoiceBackend):
 
     async def close(self):
         self._pcm_epoch = -1
+        # Cancel the turn first so _pump_pcm drops its stdout reader; then
+        # reap ffmpeg. Kill-before-cancel left unread PIPE data and hung
+        # forever inside wait() — wedging the whole device WebSocket.
+        await self._cancel_turn()
         await self._kill_radio()
-        task = self._turn_task
-        if task and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
 
     async def stop_radio(self):
         log.info("radio stop")
@@ -223,7 +220,12 @@ class GroqBackend(VoiceBackend):
         self._gen += 1
         self._pcm_epoch = -1
         self._listening = False
+        await self._cancel_turn()
         await self._kill_radio()
+        self._busy = False
+        await self.status("idle", "groq", reply="Радио выключено.", gen=self._gen)
+
+    async def _cancel_turn(self):
         task = self._turn_task
         if task and not task.done():
             task.cancel()
@@ -231,8 +233,6 @@ class GroqBackend(VoiceBackend):
                 await task
             except asyncio.CancelledError:
                 pass
-        self._busy = False
-        await self.status("idle", "groq", reply="Радио выключено.", gen=self._gen)
 
     async def _kill_radio(self):
         procs = [self._radio_proc, self._ytdlp_proc]
@@ -242,9 +242,25 @@ class GroqBackend(VoiceBackend):
             if not proc:
                 continue
             if proc.returncode is None:
-                proc.kill()
                 try:
-                    await proc.wait()
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            try:
+                # communicate() drains stdout/stderr. Plain wait() after an
+                # early _pump_pcm break (epoch/cancel) deadlocks forever when
+                # the PIPE still has unread bytes — Stop then wedges the WS
+                # session until TCP timeout ("works again after a long time").
+                await asyncio.wait_for(proc.communicate(), timeout=1.5)
+            except Exception:
+                try:
+                    transport = getattr(proc, "_transport", None)
+                    if transport is not None:
+                        transport.close()
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=0.5)
                 except Exception:
                     pass
 

@@ -342,8 +342,12 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
         set_status("Brain: connecting");
-        /* Keep s_listen. Ending it here made YouTube-induced reconnect storms
-         * flash Слушаю→Готов with listen_bytes=0. Re-send listen on reconnect. */
+        /* End listen on disconnect. Keeping it (+5) muted wake forever
+         * (maybe_wake bails while s_listen) until the 12s audio timeout —
+         * matches "wake dead / works after a long time". Gateway Stop hang
+         * caused the reconnect storms; with that fixed, ending listen here
+         * restores wake immediately. */
+        s_end_listen = true;
         s_listen_sent = false;
         s_ws_dead = true;
         break;
@@ -367,7 +371,8 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
         break;
     case WEBSOCKET_EVENT_ERROR:
-        /* Same as DISCONNECTED: do not clear listen on transport blips. */
+        /* Same as DISCONNECTED: end listen so wake is not stuck muted. */
+        s_end_listen = true;
         s_listen_sent = false;
         s_ws_dead = true;
         if (ev) {

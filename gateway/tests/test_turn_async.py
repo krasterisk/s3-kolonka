@@ -127,6 +127,69 @@ class TurnAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Радио", statuses[-1][2])
         backend.release.set()  # in case cancel didn't run finally before waiters
 
+    async def test_stop_radio_during_ffmpeg_pump_does_not_hang(self):
+        """YouTube/radio Stop used to deadlock: pump exits on epoch while
+        stdout PIPE still has unread data, then kill()+wait() never finishes.
+        That blocked the whole WS handler — second listen and wake died until
+        the connection timed out (\"works after a long time\")."""
+        import os
+        from pathlib import Path
+
+        from s3_kolonka_gw import youtube
+
+        tone = Path("/tmp/yt-sim/tone.wav")
+        if not tone.is_file():
+            os.makedirs("/tmp/yt-sim", exist_ok=True)
+            rc = os.system(
+                'ffmpeg -y -f lavfi -i "sine=f=440:d=8" -ar 16000 -ac 1 '
+                "%s >/dev/null 2>&1" % tone
+            )
+            if rc != 0:
+                self.skipTest("ffmpeg unavailable")
+
+        backend = GroqBackend({"api_key": "test"})
+        pcm_bytes = 0
+
+        async def on_pcm(data):
+            nonlocal pcm_bytes
+            pcm_bytes += len(data)
+
+        async def on_status(state, detail="", heard="", reply="", gen=None):
+            return None
+
+        await backend.start(on_pcm, on_status)
+        backend._gen = 1
+        backend._arm_tts()
+
+        cmd = youtube.ffmpeg_file_cmd(str(tone))
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        backend._radio_proc = proc
+
+        async def turn():
+            backend._busy = True
+            try:
+                await backend._pump_pcm(proc, pace=True)
+            finally:
+                backend._busy = False
+
+        backend._turn_task = asyncio.create_task(turn())
+        await asyncio.sleep(0.5)
+        self.assertGreater(pcm_bytes, 0)
+
+        await asyncio.wait_for(backend.stop_radio(), timeout=2.0)
+        self.assertIsNone(backend._radio_proc)
+        self.assertEqual(backend._pcm_epoch, -1)
+        self.assertFalse(backend._busy)
+        # No orphan ffmpeg after stop.
+        await asyncio.sleep(0.1)
+        self.assertTrue(backend._turn_task.done())
+        if proc.returncode is None:
+            self.fail("ffmpeg still running after stop_radio")
+
 
 class PrepareYoutubeTest(unittest.IsolatedAsyncioTestCase):
     async def test_prepare_skips_unavailable_then_returns_playable(self):
