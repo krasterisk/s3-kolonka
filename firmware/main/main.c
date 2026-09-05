@@ -4,6 +4,7 @@
 #include "BAT_Driver.h"
 #include "app_audio.h"
 #include "app_brain.h"
+#include "app_version.h"
 #include "app_wifi.h"
 #include "esp_board_init.h"
 #include "esp_log.h"
@@ -35,7 +36,7 @@ void app_main(void)
         ESP_LOGI(TAG, "setup AP: skip brain until Wi-Fi is saved");
     }
     app_audio_start();
-    ESP_LOGI(TAG, "s3-kolonka ready");
+    ESP_LOGI(TAG, "s3-kolonka ready firmware=%s", KOLONKA_VERSION_FULL);
 
     uint32_t tick = 0;
     while (1) {
