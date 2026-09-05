@@ -46,6 +46,10 @@ static bool s_listen_sent;
  * listen immediately (stale gen only); a long protect muted wake by leaving
  * s_listen stuck. */
 static TickType_t s_listen_protect_until;
+/* After a transport blip, keep listen briefly so a 80–200 ms reconnect
+ * (common under YouTube PCM load) can re-bind. If still offline past this
+ * deadline, end listen so wake is not muted for the full 12 s audio timeout. */
+static TickType_t s_listen_offline_deadline;
 static int s_status_gen = -1;
 static char s_status[48] = "Brain: wait";
 static char s_backend[16] = "gw";
@@ -339,15 +343,20 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
         s_need_hello = true;
         s_listen_sent = false;
         s_skip_idle = true;
+        /* Blip recovered — keep listen and re-send on the new socket. */
+        s_listen_offline_deadline = 0;
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
         set_status("Brain: connecting");
-        /* End listen on disconnect. Keeping it (+5) muted wake forever
-         * (maybe_wake bails while s_listen) until the 12s audio timeout —
-         * matches "wake dead / works after a long time". Gateway Stop hang
-         * caused the reconnect storms; with that fixed, ending listen here
-         * restores wake immediately. */
-        s_end_listen = true;
+        /* Do not end listen on the first blip. Journals show ~80 ms
+         * open→drop storms under YouTube; killing listen each time made
+         * every tap «Слушаю→Готов» (+6). Arm a short offline deadline:
+         * reconnect in time → re-bind listen; stay down → end listen so
+         * wake works (unlike sticky +5 which muted wake for ~12 s). */
+        if (s_listen && s_listen_offline_deadline == 0) {
+            s_listen_offline_deadline =
+                xTaskGetTickCount() + pdMS_TO_TICKS(2000);
+        }
         s_listen_sent = false;
         s_ws_dead = true;
         break;
@@ -371,8 +380,11 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
         break;
     case WEBSOCKET_EVENT_ERROR:
-        /* Same as DISCONNECTED: end listen so wake is not stuck muted. */
-        s_end_listen = true;
+        /* Same as DISCONNECTED: grace deadline, not instant end-listen. */
+        if (s_listen && s_listen_offline_deadline == 0) {
+            s_listen_offline_deadline =
+                xTaskGetTickCount() + pdMS_TO_TICKS(2000);
+        }
         s_listen_sent = false;
         s_ws_dead = true;
         if (ev) {
@@ -551,6 +563,14 @@ static void brain_task(void *arg)
             if (s_end_listen) {
                 s_end_listen = false;
                 s_listen = false;
+                s_listen_offline_deadline = 0;
+                app_audio_set_listen(false);
+            } else if (s_listen && s_listen_offline_deadline != 0 &&
+                       xTaskGetTickCount() >= s_listen_offline_deadline) {
+                /* Grace expired — free wake instead of sticky +5 mute. */
+                ESP_LOGW(TAG, "listen ended after offline grace");
+                s_listen = false;
+                s_listen_offline_deadline = 0;
                 app_audio_set_listen(false);
             }
             if (s_ws_dead) {
@@ -666,8 +686,10 @@ void app_brain_set_listen(bool on)
          * tick cannot clear s_listen before the listen JSON is sent. */
         s_skip_idle = true;
         s_listen_protect_until = xTaskGetTickCount() + pdMS_TO_TICKS(800);
+        s_listen_offline_deadline = 0;
     } else {
         s_listen_protect_until = 0;
+        s_listen_offline_deadline = 0;
     }
     s_listen = on;
 }

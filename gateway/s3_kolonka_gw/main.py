@@ -61,6 +61,12 @@ def load_config(path: Path) -> dict:
 
 
 async def _resume_orphan(backend, row):
+    """Re-arm listen from stashed uplink and start the turn.
+
+    Must NOT await the turn task: doing so blocked the WebSocket recv loop for
+    the whole YouTube/radio stream, so radio_stop/listen never ran until the
+    track ended (and keepalive pings failed → reconnect storms).
+    """
     pcm = row.get("pcm") or b""
     mode = row.get("mode") or "tap"
     log.info("resume orphan bytes=%s mode=%s", len(pcm), mode)
@@ -69,12 +75,6 @@ async def _resume_orphan(backend, row):
     backend._buf.extend(pcm)
     backend._heard = True
     await backend.stop()
-    task = getattr(backend, "_turn_task", None)
-    if task:
-        try:
-            await task
-        except asyncio.CancelledError:
-            raise
 
 
 async def session(ws, path, cfg):

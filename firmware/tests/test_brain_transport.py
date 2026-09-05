@@ -155,27 +155,33 @@ class BrainTransportConfigTest(unittest.TestCase):
 
 
 
-    def test_listen_blocks_playback_pcm_and_ends_on_disconnect(self):
+    def test_listen_blocks_playback_pcm_and_uses_offline_grace(self):
         """After YouTube, in-flight PCM must not re-arm DAC during listen.
-        Disconnect must END listen so wake works — sticky listen (+5) muted
-        maybe_wake until the 12s audio timeout."""
+        Disconnect must NOT instantly end listen (+6 did — every 80 ms blip
+        flashed Слушаю→Готов). Use a short offline grace, then end listen so
+        wake recovers (unlike sticky +5 which muted wake for ~12 s)."""
         self.assertIn("s_accept_play && !s_listen", BRAIN)
         self.assertIn("uplink while playing", BRAIN)
         self.assertIn("flush_play();", BRAIN)
+        self.assertIn("s_listen_offline_deadline", BRAIN)
+        self.assertIn("pdMS_TO_TICKS(2000)", BRAIN)
+        self.assertIn("listen ended after offline grace", BRAIN)
         disc = re.search(
             r"WEBSOCKET_EVENT_DISCONNECTED:(.*?)WEBSOCKET_EVENT_DATA",
             BRAIN,
             re.DOTALL,
         )
         self.assertIsNotNone(disc)
-        self.assertIn("s_end_listen = true", disc.group(1))
+        self.assertNotIn("s_end_listen = true", disc.group(1))
+        self.assertIn("s_listen_offline_deadline", disc.group(1))
         err = re.search(
             r"WEBSOCKET_EVENT_ERROR:(.*?)default:",
             BRAIN,
             re.DOTALL,
         )
         self.assertIsNotNone(err)
-        self.assertIn("s_end_listen = true", err.group(1))
+        self.assertNotIn("s_end_listen = true", err.group(1))
+        self.assertIn("s_listen_offline_deadline", err.group(1))
         audio = (FIRMWARE / "main/app/app_audio.c").read_text(encoding="utf-8")
         self.assertIn("Listen also wins over sticky s_playing", audio)
 

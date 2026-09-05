@@ -98,5 +98,45 @@ class ListenOrphanTest(unittest.TestCase):
         self.assertEqual(backend.listen_pcm_snapshot(), b"")
 
 
+class ResumeOrphanTest(unittest.IsolatedAsyncioTestCase):
+    async def test_resume_orphan_returns_without_awaiting_turn(self):
+        """Orphan resume used to await the full YouTube turn and wedged the
+        WS handler — radio_stop never ran until the track ended."""
+        import asyncio
+        import time
+
+        from s3_kolonka_gw.main import _resume_orphan
+
+        class SlowTurn(GroqBackend):
+            def __init__(self):
+                super().__init__({"api_key": "test"})
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def _finish_turn(self, pcm: bytes, turn_gen: int):
+                self.started.set()
+                await self.release.wait()
+
+        backend = SlowTurn()
+
+        async def on_pcm(_d):
+            return None
+
+        async def on_status(*_a, **_k):
+            return None
+
+        await backend.start(on_pcm, on_status)
+        t0 = time.monotonic()
+        await asyncio.wait_for(
+            _resume_orphan(backend, {"pcm": b"\x00\x01" * 9000, "mode": "tap"}),
+            timeout=1.0,
+        )
+        self.assertLess(time.monotonic() - t0, 0.5)
+        await asyncio.wait_for(backend.started.wait(), timeout=0.5)
+        self.assertFalse(backend._turn_task.done())
+        backend.release.set()
+        await asyncio.wait_for(backend._turn_task, timeout=0.5)
+
+
 if __name__ == "__main__":
     unittest.main()
