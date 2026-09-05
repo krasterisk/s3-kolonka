@@ -43,6 +43,7 @@ static char s_cmd_title[64];
 static char s_brain_uri[96];
 static RingbufHandle_t s_play_rb;
 static RingbufHandle_t s_up_rb;
+static RingbufHandle_t s_txt_rb;
 static volatile bool s_accept_play;
 static volatile bool s_abort_play;
 static volatile uint32_t s_play_epoch;
@@ -153,6 +154,21 @@ static void flush_play(void)
     }
 }
 
+static void flush_text(void)
+{
+    if (!s_txt_rb) {
+        return;
+    }
+    while (1) {
+        size_t n = 0;
+        char *item = (char *)xRingbufferReceive(s_txt_rb, &n, 0);
+        if (!item) {
+            break;
+        }
+        vRingbufferReturnItem(s_txt_rb, item);
+    }
+}
+
 static void request_abort_play(void)
 {
     s_accept_play = false;
@@ -249,6 +265,22 @@ static void handle_text(const char *data, int len)
     cJSON_Delete(root);
 }
 
+static void drain_text(void)
+{
+    if (!s_txt_rb) {
+        return;
+    }
+    while (1) {
+        size_t n = 0;
+        char *item = (char *)xRingbufferReceive(s_txt_rb, &n, 0);
+        if (!item) {
+            return;
+        }
+        handle_text(item, (int)n);
+        vRingbufferReturnItem(s_txt_rb, item);
+    }
+}
+
 static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
@@ -272,8 +304,14 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (!ev || ev->data_len <= 0 || !ev->data_ptr) {
             break;
         }
-        if (ev->op_code == 1) {
-            handle_text(ev->data_ptr, ev->data_len);
+        if (ev->op_code == 1 && s_txt_rb) {
+            /* Queue only. Parsing JSON or stopping I2S here used to hold
+             * client->lock across EVENT_DATA on 1.4 and starve send_bin
+             * (IDFGH-13387 / esp-protocols#625). Client >=1.5 releases that
+             * lock, but I2S stop still must not run in the RX task. */
+            if (xRingbufferSend(s_txt_rb, ev->data_ptr, (size_t)ev->data_len, 0) != pdTRUE) {
+                ESP_LOGW(TAG, "text drop");
+            }
         } else if (ev->op_code == 2 && s_play_rb && s_accept_play) {
             xRingbufferSend(s_play_rb, ev->data_ptr, (size_t)ev->data_len, 0);
         }
@@ -394,6 +432,8 @@ static void brain_task(void *arg)
                      (unsigned)esp_get_free_heap_size(),
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                      brain_uri());
+            /* Pin WS RX next to LWIP (core 0), above AFE feed (prio 5).
+             * task_core_id is ignored unless task_core_id_set is true (1.7+). */
             esp_websocket_client_config_t cfg = {
                 .uri = s_brain_uri,
                 .host = BRAIN_HOST,
@@ -402,9 +442,16 @@ static void brain_task(void *arg)
                 .transport = WEBSOCKET_TRANSPORT_OVER_TCP,
                 .buffer_size = 8192,
                 .task_stack = 8192,
-                .network_timeout_ms = 60000,
+                .task_prio = 6,
+                .task_core_id = 0,
+                .task_core_id_set = true,
+                .network_timeout_ms = 10000,
                 .reconnect_timeout_ms = 3000,
                 .disable_auto_reconnect = true,
+                .keep_alive_enable = true,
+                .keep_alive_idle = 5,
+                .keep_alive_interval = 5,
+                .keep_alive_count = 3,
                 .ping_interval_sec = 15,
                 .pingpong_timeout_sec = 90,
             };
@@ -439,6 +486,7 @@ static void brain_task(void *arg)
                 app_audio_set_listen(false);
             }
             flush_uplink();
+            flush_text();
             set_status("Brain: connecting");
             s_ws_dead = false;
             brain_destroy();
@@ -448,6 +496,7 @@ static void brain_task(void *arg)
         }
 
         wait_ticks = 0;
+        drain_text();
         if (s_need_hello) {
             s_need_hello = false;
             send_json("{\"type\":\"hello\",\"device\":\"s3-kolonka\"}");
@@ -476,7 +525,7 @@ static void brain_task(void *arg)
         }
 
         size_t n = 0;
-        uint8_t *item = xRingbufferReceive(s_up_rb, &n, pdMS_TO_TICKS(s_listen ? 20 : 200));
+        uint8_t *item = xRingbufferReceive(s_up_rb, &n, pdMS_TO_TICKS(s_listen ? 20 : 50));
         if (!item) {
             continue;
         }
@@ -499,6 +548,10 @@ void app_brain_start(void)
     s_up_rb = xRingbufferCreateWithCaps(32 * 1024, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
     if (!s_up_rb) {
         s_up_rb = xRingbufferCreate(16 * 1024, RINGBUF_TYPE_NOSPLIT);
+    }
+    s_txt_rb = xRingbufferCreateWithCaps(8 * 1024, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
+    if (!s_txt_rb) {
+        s_txt_rb = xRingbufferCreate(4 * 1024, RINGBUF_TYPE_NOSPLIT);
     }
     app_audio_set_mic_sink(mic_sink);
     /* Both on core 1. Core 0 is Wi-Fi/LWIP; a listen send loop there drops TCP. */

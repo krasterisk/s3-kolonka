@@ -34,6 +34,7 @@ and this project uses [Semantic Versioning](https://semver.org/) after 1.0.0.
 - If the speaker drops mid-listen, the gateway keeps the clip and finishes the turn on reconnect
 - YouTube keeps the full «или» show title, prefers episodes, and skips already played clips (другой / следующий)
 - After radio stop the speaker reconnects immediately instead of sitting on retry
+- Speaker WebSocket no longer parses JSON or stops I2S inside the RX callback; `esp_websocket_client` is 1.7+ so TX is not blocked by RX (IDFGH-13387)
 
 ## [0.1.0] - 2026-09-03
 
