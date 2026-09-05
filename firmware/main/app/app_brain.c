@@ -46,10 +46,13 @@ static bool s_listen_sent;
  * listen immediately (stale gen only); a long protect muted wake by leaving
  * s_listen stuck. */
 static TickType_t s_listen_protect_until;
-/* After a transport blip, keep listen briefly so a 80–200 ms reconnect
- * (common under YouTube PCM load) can re-bind. If still offline past this
- * deadline, end listen so wake is not muted for the full 12 s audio timeout. */
+/* After a transport blip, keep listen briefly so a short reconnect can
+ * re-bind. Absolute deadline from the FIRST blip — reconnect must NOT reset
+ * it (storms of ~80 ms open→drop under YouTube would otherwise extend listen
+ * forever and mute wake for minutes after Stop). Clear only after ~500 ms
+ * stable online, or when listen ends. */
 static TickType_t s_listen_offline_deadline;
+static TickType_t s_listen_online_since;
 static int s_status_gen = -1;
 static char s_status[48] = "Brain: wait";
 static char s_backend[16] = "gw";
@@ -343,16 +346,18 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
         s_need_hello = true;
         s_listen_sent = false;
         s_skip_idle = true;
-        /* Blip recovered — keep listen and re-send on the new socket. */
-        s_listen_offline_deadline = 0;
+        /* Do NOT clear offline deadline here — a reconnect storm would
+         * reset it forever. Track online-since; brain_task clears deadline
+         * only after ~500 ms stable. */
+        s_listen_online_since = xTaskGetTickCount();
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
         set_status("Brain: connecting");
         /* Do not end listen on the first blip. Journals show ~80 ms
          * open→drop storms under YouTube; killing listen each time made
-         * every tap «Слушаю→Готов» (+6). Arm a short offline deadline:
-         * reconnect in time → re-bind listen; stay down → end listen so
-         * wake works (unlike sticky +5 which muted wake for ~12 s). */
+         * every tap «Слушаю→Готов» (+6). Arm a short ABSOLUTE deadline
+         * from the first blip (reconnect must not extend it). */
+        s_listen_online_since = 0;
         if (s_listen && s_listen_offline_deadline == 0) {
             s_listen_offline_deadline =
                 xTaskGetTickCount() + pdMS_TO_TICKS(2000);
@@ -380,7 +385,8 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
         break;
     case WEBSOCKET_EVENT_ERROR:
-        /* Same as DISCONNECTED: grace deadline, not instant end-listen. */
+        /* Same as DISCONNECTED: absolute grace deadline, not instant end. */
+        s_listen_online_since = 0;
         if (s_listen && s_listen_offline_deadline == 0) {
             s_listen_offline_deadline =
                 xTaskGetTickCount() + pdMS_TO_TICKS(2000);
@@ -564,13 +570,16 @@ static void brain_task(void *arg)
                 s_end_listen = false;
                 s_listen = false;
                 s_listen_offline_deadline = 0;
+                s_listen_online_since = 0;
                 app_audio_set_listen(false);
             } else if (s_listen && s_listen_offline_deadline != 0 &&
                        xTaskGetTickCount() >= s_listen_offline_deadline) {
-                /* Grace expired — free wake instead of sticky +5 mute. */
+                /* Absolute grace from first blip expired — free wake.
+                 * Reconnect storms must not extend this (+7 reset bug). */
                 ESP_LOGW(TAG, "listen ended after offline grace");
                 s_listen = false;
                 s_listen_offline_deadline = 0;
+                s_listen_online_since = 0;
                 app_audio_set_listen(false);
             }
             if (s_ws_dead) {
@@ -594,6 +603,20 @@ static void brain_task(void *arg)
         }
 
         wait_ticks = 0;
+        /* Stable online ≥500 ms → first-blip deadline no longer applies. */
+        if (s_listen_offline_deadline != 0 && s_listen_online_since != 0 &&
+            (xTaskGetTickCount() - s_listen_online_since) >= pdMS_TO_TICKS(500)) {
+            s_listen_offline_deadline = 0;
+        }
+        /* Deadline can fire while we look "connected" during a flap. */
+        if (s_listen && s_listen_offline_deadline != 0 &&
+            xTaskGetTickCount() >= s_listen_offline_deadline) {
+            ESP_LOGW(TAG, "listen ended after offline grace");
+            s_listen = false;
+            s_listen_offline_deadline = 0;
+            s_listen_online_since = 0;
+            app_audio_set_listen(false);
+        }
         drain_text();
         if (s_need_hello) {
             s_need_hello = false;

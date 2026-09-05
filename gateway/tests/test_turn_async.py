@@ -110,7 +110,10 @@ class TurnAsyncTest(unittest.IsolatedAsyncioTestCase):
         async def on_status(state, detail="", heard="", reply="", gen=None):
             statuses.append((state, gen, reply))
 
-        await backend.start(lambda _d: None, on_status)
+        async def on_pcm(_d):
+            return None
+
+        await backend.start(on_pcm, on_status)
         await backend.listen()
         await backend.send_pcm(b"\x00\x00" * 2000)
         await backend.stop()
@@ -121,11 +124,49 @@ class TurnAsyncTest(unittest.IsolatedAsyncioTestCase):
         await backend.stop_radio()
         self.assertFalse(backend._busy)
         self.assertEqual(backend._gen, gen_before + 1)
-        self.assertTrue(backend._turn_task.done())
         self.assertEqual(statuses[-1][0], "idle")
         self.assertEqual(statuses[-1][1], backend._gen)
         self.assertIn("Радио", statuses[-1][2])
-        backend.release.set()  # in case cancel didn't run finally before waiters
+        backend.release.set()
+
+    async def test_stop_radio_returns_while_turn_finally_blocks(self):
+        """After Stop, session must not wait on a turn whose finally/teardown
+        is slow (yt-dlp child, WS backpressure). Otherwise listen is dead for
+        minutes until TCP timeout."""
+        import time
+
+        class StickyFinally(GroqBackend):
+            def __init__(self):
+                super().__init__({"api_key": "test"})
+                self.in_finally = asyncio.Event()
+
+            async def _finish_turn(self, pcm: bytes, turn_gen: int):
+                try:
+                    await asyncio.Event().wait()  # cancelled here
+                finally:
+                    self.in_finally.set()
+                    await asyncio.sleep(30)  # would block forever without timeout
+
+        backend = StickyFinally()
+        statuses = []
+
+        async def on_status(state, detail="", heard="", reply="", gen=None):
+            statuses.append(state)
+
+        async def on_pcm(_d):
+            return None
+
+        await backend.start(on_pcm, on_status)
+        await backend.listen()
+        await backend.send_pcm(b"\x00\x00" * 2000)
+        await backend.stop()
+        await asyncio.sleep(0.05)
+        t0 = time.monotonic()
+        await asyncio.wait_for(backend.stop_radio(), timeout=3.0)
+        self.assertLess(time.monotonic() - t0, 2.5)
+        self.assertFalse(backend._busy)
+        self.assertEqual(statuses[-1], "idle")
+        await asyncio.wait_for(backend.in_finally.wait(), timeout=0.5)
 
     async def test_stop_radio_during_ffmpeg_pump_does_not_hang(self):
         """YouTube/radio Stop used to deadlock: pump exits on epoch while
@@ -190,6 +231,67 @@ class TurnAsyncTest(unittest.IsolatedAsyncioTestCase):
         if proc.returncode is None:
             self.fail("ffmpeg still running after stop_radio")
 
+    async def test_cancelled_youtube_download_reaps_proc(self):
+        """Cancel during yt-dlp must kill the download, not leave it sticky
+        in finally after stop_radio cleared _ytdlp_proc."""
+        import os
+        from pathlib import Path
+        from unittest import mock
+
+        class FakeProc:
+            def __init__(self):
+                self.pid = 424242
+                self.returncode = None
+                self.kill_called = False
+                self.wait_called = False
+
+            def kill(self):
+                self.kill_called = True
+                self.returncode = -9
+
+            async def wait(self):
+                self.wait_called = True
+                return self.returncode
+
+            async def communicate(self):
+                await asyncio.Event().wait()
+                return (b"", b"")
+
+        fake = FakeProc()
+        cache = Path("/tmp/s3-kolonka-yt-cancel")
+        cache.mkdir(parents=True, exist_ok=True)
+        backend = GroqBackend(
+            {"api_key": "test"},
+            youtube_cfg={"cache_dir": str(cache)},
+        )
+
+        async def fake_exec(*_a, **_k):
+            return fake
+
+        def fake_killpg(pid, sig):
+            raise ProcessLookupError(pid)
+
+        with mock.patch("asyncio.create_subprocess_exec", fake_exec), mock.patch(
+            "os.killpg", fake_killpg
+        ), mock.patch(
+            "s3_kolonka_gw.youtube.cached_file", return_value=None
+        ), mock.patch(
+            "s3_kolonka_gw.youtube.video_id_from_source", return_value="cancelMe01"
+        ), mock.patch(
+            "s3_kolonka_gw.youtube.ytdlp_download_cmd",
+            return_value=["yt-dlp", "x"],
+        ):
+            task = asyncio.create_task(
+                backend._ensure_youtube_file("yt://cancelMe01")
+            )
+            await asyncio.sleep(0.05)
+            self.assertIs(backend._ytdlp_proc, fake)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertIsNone(backend._ytdlp_proc)
+            self.assertTrue(fake.kill_called)
+            self.assertTrue(fake.wait_called)
 
 class PrepareYoutubeTest(unittest.IsolatedAsyncioTestCase):
     async def test_prepare_skips_unavailable_then_returns_playable(self):

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -206,33 +207,35 @@ class GroqBackend(VoiceBackend):
 
     async def close(self):
         self._pcm_epoch = -1
-        # Cancel the turn first so _pump_pcm drops its stdout reader; then
-        # reap ffmpeg. Kill-before-cancel left unread PIPE data and hung
-        # forever inside wait() — wedging the whole device WebSocket.
-        await self._cancel_turn()
+        # Kill ffmpeg/yt-dlp first so a cancelled turn unblocks out of
+        # communicate()/stdout.read, then wait briefly for the task.
         await self._kill_radio()
+        await self._cancel_turn()
 
     async def stop_radio(self):
         log.info("radio stop")
-        # Bump gen + cancel the turn that is still pumping YouTube/radio.
-        # Without this, a late idle/thinking from the same gen races the next
-        # listen and the device flashes Слушаю→Готов with listen_bytes=0.
+        # Bump gen + tear down media. Must return fast: awaiting a turn stuck
+        # in yt-dlp/executor/WS backpressure used to block the whole device
+        # session for minutes (no listen until TCP timeout).
         self._gen += 1
         self._pcm_epoch = -1
         self._listening = False
-        await self._cancel_turn()
         await self._kill_radio()
+        await self._cancel_turn()
         self._busy = False
         await self.status("idle", "groq", reply="Радио выключено.", gen=self._gen)
 
     async def _cancel_turn(self):
         task = self._turn_task
-        if task and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        if not task or task.done():
+            return
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        except Exception:
+            log.exception("cancel turn")
 
     async def _kill_radio(self):
         procs = [self._radio_proc, self._ytdlp_proc]
@@ -242,10 +245,16 @@ class GroqBackend(VoiceBackend):
             if not proc:
                 continue
             if proc.returncode is None:
+                # yt-dlp/ffmpeg spawn children; kill the whole process group
+                # (created with start_new_session=True). Killing only the parent
+                # left downloads running and the next listen wedged for minutes.
                 try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
             try:
                 # communicate() drains stdout/stderr. Plain wait() after an
                 # early _pump_pcm break (epoch/cancel) deadlocks forever when
@@ -314,6 +323,7 @@ class GroqBackend(VoiceBackend):
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
         )
         self._radio_proc = proc
         await self._pump_pcm(proc)
@@ -335,6 +345,7 @@ class GroqBackend(VoiceBackend):
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         self._ytdlp_proc = proc
         try:
@@ -342,8 +353,27 @@ class GroqBackend(VoiceBackend):
         except asyncio.TimeoutError:
             await self._kill_radio()
             raise RuntimeError("youtube download timeout")
+        except asyncio.CancelledError:
+            # stop_radio/close may already have cleared _ytdlp_proc — still
+            # reap THIS proc so a cancelled download cannot outlive Stop.
+            if self._ytdlp_proc is proc:
+                self._ytdlp_proc = None
+            if proc.returncode is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=0.5)
+            except Exception:
+                pass
+            raise
         finally:
-            self._ytdlp_proc = None
+            if self._ytdlp_proc is proc:
+                self._ytdlp_proc = None
         if proc.returncode != 0:
             raise RuntimeError((err or b"").decode("utf-8", "replace")[-240:] or "yt-dlp failed")
         src = tmp if tmp.is_file() else None
@@ -372,6 +402,7 @@ class GroqBackend(VoiceBackend):
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
         )
         self._radio_proc = proc
         await self._pump_pcm(proc, pace=True)

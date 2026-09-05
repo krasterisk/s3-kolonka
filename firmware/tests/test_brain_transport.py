@@ -158,14 +158,25 @@ class BrainTransportConfigTest(unittest.TestCase):
     def test_listen_blocks_playback_pcm_and_uses_offline_grace(self):
         """After YouTube, in-flight PCM must not re-arm DAC during listen.
         Disconnect must NOT instantly end listen (+6 did — every 80 ms blip
-        flashed Слушаю→Готов). Use a short offline grace, then end listen so
-        wake recovers (unlike sticky +5 which muted wake for ~12 s)."""
+        flashed Слушаю→Готов). Use a short ABSOLUTE offline grace from the
+        first blip (+8): reconnect storms must not reset the deadline (+7
+        bug muted wake for minutes). Clear only after ~500 ms stable online."""
         self.assertIn("s_accept_play && !s_listen", BRAIN)
         self.assertIn("uplink while playing", BRAIN)
         self.assertIn("flush_play();", BRAIN)
         self.assertIn("s_listen_offline_deadline", BRAIN)
+        self.assertIn("s_listen_online_since", BRAIN)
         self.assertIn("pdMS_TO_TICKS(2000)", BRAIN)
+        self.assertIn("pdMS_TO_TICKS(500)", BRAIN)
         self.assertIn("listen ended after offline grace", BRAIN)
+        connected = re.search(
+            r"WEBSOCKET_EVENT_CONNECTED:(.*?)WEBSOCKET_EVENT_DISCONNECTED",
+            BRAIN,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(connected)
+        self.assertNotIn("s_listen_offline_deadline = 0", connected.group(1))
+        self.assertIn("s_listen_online_since", connected.group(1))
         disc = re.search(
             r"WEBSOCKET_EVENT_DISCONNECTED:(.*?)WEBSOCKET_EVENT_DATA",
             BRAIN,
@@ -174,6 +185,7 @@ class BrainTransportConfigTest(unittest.TestCase):
         self.assertIsNotNone(disc)
         self.assertNotIn("s_end_listen = true", disc.group(1))
         self.assertIn("s_listen_offline_deadline", disc.group(1))
+        self.assertIn("s_listen_offline_deadline == 0", disc.group(1))
         err = re.search(
             r"WEBSOCKET_EVENT_ERROR:(.*?)default:",
             BRAIN,
