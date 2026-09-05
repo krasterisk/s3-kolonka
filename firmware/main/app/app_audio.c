@@ -345,8 +345,13 @@ static void afe_feed_task(void *arg)
         }
         afe_aec_feed(buf);
         /* Hey Jarvis was trained on raw mic. AFE output in silence misses.
-         * Listen must still run if pcm:// left s_radio stuck without idle. */
-        if (wake_mono && !s_playing && (!s_radio || s_listen)) {
+         * Listen must still run if pcm:// left s_radio stuck without idle.
+         * Listen also wins over sticky s_playing (xiaozhi EnableVoiceProcessing
+         * after IsPlaybackIdle — we abort DAC and keep feeding STT). */
+        if (wake_mono && (s_listen || (!s_playing && !s_radio))) {
+            if (s_listen && s_playing) {
+                app_audio_play_abort();
+            }
             for (int i = 0; i < samples; i++) {
                 wake_mono[i] = buf[ch * i + MIC_L_CH];
             }

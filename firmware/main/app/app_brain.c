@@ -342,7 +342,8 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
         set_status("Brain: connecting");
-        s_end_listen = true;
+        /* Keep s_listen. Ending it here made YouTube-induced reconnect storms
+         * flash Слушаю→Готов with listen_bytes=0. Re-send listen on reconnect. */
         s_listen_sent = false;
         s_ws_dead = true;
         break;
@@ -358,12 +359,15 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
             if (xRingbufferSend(s_txt_rb, ev->data_ptr, (size_t)ev->data_len, 0) != pdTRUE) {
                 ESP_LOGW(TAG, "text drop");
             }
-        } else if (ev->op_code == 2 && s_play_rb && s_accept_play) {
+        } else if (ev->op_code == 2 && s_play_rb && s_accept_play && !s_listen) {
+            /* Never arm DAC while listening. In-flight YouTube PCM after
+             * radio_stop/listen re-set s_playing and muted mic uplink
+             * (xiaozhi waits for IsPlaybackIdle before EnableVoiceProcessing). */
             xRingbufferSend(s_play_rb, ev->data_ptr, (size_t)ev->data_len, 0);
         }
         break;
     case WEBSOCKET_EVENT_ERROR:
-        s_end_listen = true;
+        /* Same as DISCONNECTED: do not clear listen on transport blips. */
         s_listen_sent = false;
         s_ws_dead = true;
         if (ev) {
@@ -412,12 +416,20 @@ static void play_task(void *arg)
             continue;
         }
         idle_ms = 0;
+        if (s_listen || app_audio_is_listening()) {
+            /* Drop leftover radio/TTS PCM — never re-arm s_playing during listen. */
+            vRingbufferReturnItem(s_play_rb, item);
+            if (app_audio_is_playing()) {
+                app_audio_play_abort();
+            }
+            continue;
+        }
         const int16_t *mono = (const int16_t *)item;
         int samples = (int)n / (int)sizeof(int16_t);
         int off = 0;
         uint32_t epoch = s_play_epoch;
         while (off < samples) {
-            if (s_abort_play || epoch != s_play_epoch) {
+            if (s_abort_play || epoch != s_play_epoch || s_listen) {
                 break;
             }
             int take = samples - off;
@@ -441,7 +453,14 @@ static void mic_sink(const int16_t *mono, int samples)
         return;
     }
     if (app_audio_is_playing()) {
-        return;
+        /* Explicit listen must win. Sticky s_playing after pcm:// used to
+         * drop every uplink frame → gateway too-short → Слушаю→Готов. */
+        ESP_LOGW(TAG, "uplink while playing — abort dac");
+        request_abort_play();
+        app_audio_play_abort();
+        if (app_audio_is_playing()) {
+            return;
+        }
     }
     if (xRingbufferSend(s_up_rb, mono, (size_t)samples * sizeof(int16_t), 0) != pdTRUE) {
         ESP_LOGW(TAG, "uplink drop");
@@ -583,6 +602,7 @@ static void brain_task(void *arg)
                 s_listen_protect_until =
                     xTaskGetTickCount() + pdMS_TO_TICKS(800);
                 request_abort_play();
+                flush_play();
                 app_audio_radio_stop();
                 send_json(s_wake_mode ? "{\"type\":\"listen\",\"mode\":\"wake\"}"
                                       : "{\"type\":\"listen\",\"mode\":\"tap\"}");

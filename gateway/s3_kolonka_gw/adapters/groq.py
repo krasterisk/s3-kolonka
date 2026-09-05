@@ -171,6 +171,7 @@ class GroqBackend(VoiceBackend):
         pcm = bytes(self._buf)
         self._buf.clear()
         self._reset_vad()
+        log.info("stop listen bytes=%s gen=%s", len(pcm), self._gen)
         self._turn_task = asyncio.create_task(self._run_turn(pcm), name="gw-turn")
 
     async def _run_turn(self, pcm: bytes):
@@ -364,6 +365,7 @@ class GroqBackend(VoiceBackend):
             await self._status_if(turn_gen, "idle", "groq")
             return
         if len(pcm) < 3200:
+            log.info("turn too short bytes=%s gen=%s", len(pcm), turn_gen)
             await self._status_if(turn_gen, "idle", "groq: too short")
             return
 
