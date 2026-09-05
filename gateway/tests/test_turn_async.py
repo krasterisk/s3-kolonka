@@ -1,4 +1,5 @@
 import asyncio
+import shutil
 import unittest
 
 from s3_kolonka_gw.adapters.groq import GroqBackend
@@ -99,13 +100,16 @@ class TurnAsyncTest(unittest.IsolatedAsyncioTestCase):
 
 class PrepareYoutubeTest(unittest.IsolatedAsyncioTestCase):
     async def test_prepare_skips_unavailable_then_returns_playable(self):
+        import tempfile
         from pathlib import Path
 
         from s3_kolonka_gw import youtube as yt
 
+        cache_dir = tempfile.mkdtemp(prefix="s3-kolonka-yt-test-")
+        self.addCleanup(shutil.rmtree, cache_dir, True)
         backend = GroqBackend(
             {"api_key": "test"},
-            youtube_cfg={"cache_dir": "/tmp/s3-kolonka-yt-test"},
+            youtube_cfg={"cache_dir": cache_dir},
         )
         first = {"source": "yt://peDON2N4CoQ", "title": "ТУТХАМОН", "video_id": "peDON2N4CoQ"}
         tried = []
