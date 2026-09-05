@@ -38,6 +38,7 @@ and this project uses [Semantic Versioning](https://semver.org/) after 1.0.0.
 - `brain_task` is the only task that writes to the socket, so the client keeps its single default lock; the build fails if the separate TX lock is switched on
 - Microphone PCM uses 20 ms frames and a 5 s network-write budget; its dedicated TX task no longer sleeps after every frame and throttles the 32 KB/s uplink
 - Brain WebSocket keeps one client with auto-reconnect; it no longer destroys mid-handshake (that caused the open→drop reconnect loop)
+- Listen clears sticky `pcm://` radio state so «Слушаю» is not muted after a failed/cancelled YouTube play
 
 ## [0.1.0] - 2026-09-03
 

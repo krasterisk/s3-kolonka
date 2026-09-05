@@ -173,6 +173,16 @@ int app_audio_mic_level(void)
 
 void app_audio_set_listen(bool on)
 {
+    if (on) {
+        /* pcm:// radio_play leaves s_radio set; if the stream errors without
+         * idle, mic uplink stays muted while the UI still shows «Слушаю». */
+        if (s_radio) {
+            app_audio_radio_stop();
+        }
+        if (s_playing) {
+            app_audio_play_abort();
+        }
+    }
     s_listen = on;
     s_listen_samples = 0;
     s_silence_samples = 0;
@@ -240,17 +250,22 @@ static void handle_mono(const int16_t *mono, int frames, bool do_wake)
     }
     s_mic_level = (s_mic_level * 2 + level) / 3;
 
-    if (s_listen && !s_radio) {
+    if (s_listen) {
+        /* Explicit listen wins over a sticky pcm:// radio flag so uplink is not
+         * muted while the UI shows «Слушаю». */
+        if (s_radio) {
+            set_radio(false);
+            s_radio_http = false;
+        }
         s_listen_samples += frames;
         /* Do not cut on a short pause — the gateway VAD ends the turn. */
         if (s_listen_samples >= SAMPLE_RATE * 12) {
             s_listen = false;
             s_mic_level = 0;
         }
-    }
-
-    if (s_mic_sink && s_listen && !s_radio) {
-        s_mic_sink(mono, frames);
+        if (s_mic_sink) {
+            s_mic_sink(mono, frames);
+        }
     }
 
     if (do_wake) {
@@ -329,12 +344,15 @@ static void afe_feed_task(void *arg)
             continue;
         }
         afe_aec_feed(buf);
-        /* Hey Jarvis was trained on raw mic. AFE output in silence misses. */
-        if (wake_mono && !s_playing && !s_radio) {
+        /* Hey Jarvis was trained on raw mic. AFE output in silence misses.
+         * Listen must still run if pcm:// left s_radio stuck without idle. */
+        if (wake_mono && !s_playing && (!s_radio || s_listen)) {
             for (int i = 0; i < samples; i++) {
                 wake_mono[i] = buf[ch * i + MIC_L_CH];
             }
-            maybe_wake(wake_mono, samples);
+            if (!s_listen) {
+                maybe_wake(wake_mono, samples);
+            }
             if (s_listen) {
                 /* STT uses raw mic; AFE after radio/TTS gates the voice as echo. */
                 handle_mono(wake_mono, samples, false);

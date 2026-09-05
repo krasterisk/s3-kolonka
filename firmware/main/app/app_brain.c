@@ -224,6 +224,9 @@ static void handle_text(const char *data, int len)
             if (strcmp(st, "live") == 0 || strcmp(st, "thinking") == 0 ||
                 strcmp(st, "error") == 0) {
                 request_abort_play();
+                /* pcm:// YouTube/radio sets s_radio; live/thinking/error must
+                 * clear it or the next «Слушаю» shows UI with a muted mic. */
+                app_audio_radio_stop();
             } else if (strcmp(st, "radio") == 0) {
                 s_abort_play = false;
                 s_accept_play = true;

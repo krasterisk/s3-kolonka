@@ -314,17 +314,23 @@ void ui_tick(void)
     int value = 0;
     if (app_brain_take_cmd(cmd, sizeof(cmd), &value)) {
         if (strcmp(cmd, "radio_play") == 0) {
-            const char *url = app_brain_cmd_url();
-            const char *title = app_brain_cmd_title();
-            if (app_audio_radio_start(url)) {
-                if (title && title[0]) {
-                    strncpy(s_radio_title, title, sizeof(s_radio_title) - 1);
-                    s_radio_title[sizeof(s_radio_title) - 1] = 0;
+            /* A late radio_play after the user re-opened listen would set
+             * s_radio and mute the mic while the UI still says «Слушаю». */
+            if (app_audio_is_listening()) {
+                ESP_LOGW("ui", "ignore radio_play while listening");
+            } else {
+                const char *url = app_brain_cmd_url();
+                const char *title = app_brain_cmd_title();
+                if (app_audio_radio_start(url)) {
+                    if (title && title[0]) {
+                        strncpy(s_radio_title, title, sizeof(s_radio_title) - 1);
+                        s_radio_title[sizeof(s_radio_title) - 1] = 0;
+                    }
+                    ui_home_set_heard("");
+                    ui_home_set_reply("");
+                    ui_media_set_playing(true, s_radio_title[0] ? s_radio_title : title);
+                    ui_go_page(UI_PAGE_MEDIA);
                 }
-                ui_home_set_heard("");
-                ui_home_set_reply("");
-                ui_media_set_playing(true, s_radio_title[0] ? s_radio_title : title);
-                ui_go_page(UI_PAGE_MEDIA);
             }
         } else if (strcmp(cmd, "radio_stop") == 0) {
             ui_handle_radio_stop();

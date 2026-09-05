@@ -67,6 +67,30 @@ class BrainTransportConfigTest(unittest.TestCase):
         self.assertIn("wait_ticks >= 24", body)
         self.assertNotIn("s_ws_dead ||", BRAIN)
 
+    def test_listen_clears_sticky_pcm_radio(self):
+        """pcm:// radio_play sets s_radio; if the stream dies without idle and
+        the user re-opens listen, the mic stayed muted while UI said Слушаю."""
+        audio = (FIRMWARE / "main/app/app_audio.c").read_text(encoding="utf-8")
+        ui = (FIRMWARE / "main/ui/ui.c").read_text(encoding="utf-8")
+        set_listen = re.search(
+            r"void app_audio_set_listen\(bool on\)\s*\{(.*?)^\}",
+            audio,
+            re.DOTALL | re.MULTILINE,
+        )
+        self.assertIsNotNone(set_listen)
+        self.assertIn("app_audio_radio_stop()", set_listen.group(1))
+        self.assertIn("live", BRAIN)
+        # live/thinking/error must clear radio, not only abort PCM play
+        live_block = re.search(
+            r'strcmp\(st, "live"\).*?strcmp\(st, "error"\).*?\{(.*?)\} else if',
+            BRAIN,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(live_block)
+        self.assertIn("app_audio_radio_stop()", live_block.group(1))
+        self.assertIn("ignore radio_play while listening", ui)
+        self.assertIn("app_audio_is_listening()", ui)
+
 
 if __name__ == "__main__":
     unittest.main()

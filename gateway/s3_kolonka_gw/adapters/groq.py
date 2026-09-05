@@ -399,7 +399,14 @@ class GroqBackend(VoiceBackend):
             self._arm_tts()
             await self.status("radio", title, heard=user_text, reply=title)
             stream_gen = self._gen
-            await self._stream_radio(source)
+            try:
+                await self._stream_radio(source)
+            except Exception as exc:
+                log.exception("youtube stream")
+                if self._gen == stream_gen:
+                    await self._emit_cmds([{"name": "radio_stop"}])
+                    await self.status("error", "youtube: %s" % exc, heard=user_text)
+                return
             if self._gen == stream_gen:
                 await self.status("idle", "groq")
             return
@@ -412,7 +419,14 @@ class GroqBackend(VoiceBackend):
             self._arm_tts()
             await self.status("radio", title, heard=user_text, reply=title)
             stream_gen = self._gen
-            await self._stream_radio(source)
+            try:
+                await self._stream_radio(source)
+            except Exception as exc:
+                log.exception("radio stream")
+                if self._gen == stream_gen:
+                    await self._emit_cmds([{"name": "radio_stop"}])
+                    await self.status("error", "radio: %s" % exc, heard=user_text)
+                return
             if self._gen == stream_gen:
                 await self.status("idle", "groq")
             return
