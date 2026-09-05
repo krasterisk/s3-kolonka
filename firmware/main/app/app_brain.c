@@ -240,25 +240,27 @@ static void handle_text(const char *data, int len)
                 s_accept_play = true;
                 app_audio_radio_stop();
             } else if (strcmp(st, "idle") == 0) {
-                s_accept_play = false;
-                if (app_audio_is_radio()) {
-                    s_abort_play = true;
-                }
+                /* Always abort PCM — YouTube pcm:// may have cleared s_radio
+                 * while s_playing is still true. */
+                request_abort_play();
                 app_audio_radio_stop();
             }
             const cJSON *gen_j = cJSON_GetObjectItem(root, "gen");
             int msg_gen = cJSON_IsNumber(gen_j) ? (int)gen_j->valuedouble : -1;
             if (strcmp(st, "live") == 0) {
-                /* New listen session: bind gen; idle-protect only (see below). */
+                /* New listen session: idle-protect; gen updated below. */
                 s_skip_idle = true;
                 s_listen_protect_until =
                     xTaskGetTickCount() + pdMS_TO_TICKS(800);
-                if (msg_gen >= 0) {
-                    s_status_gen = msg_gen;
-                }
             }
+            /* Older gens are stale. Equal/newer must apply — otherwise a lost
+             * live frame made thinking/idle with gen+1 look "stale" forever
+             * (!=) and left listen stuck or rejected the whole turn. */
             bool stale_gen =
-                (s_status_gen >= 0 && msg_gen >= 0 && msg_gen != s_status_gen);
+                (s_status_gen >= 0 && msg_gen >= 0 && msg_gen < s_status_gen);
+            if (!stale_gen && msg_gen >= 0) {
+                s_status_gen = msg_gen;
+            }
             bool idle_protect =
                 (s_listen_protect_until != 0 &&
                  xTaskGetTickCount() < s_listen_protect_until);

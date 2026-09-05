@@ -100,6 +100,9 @@ class BrainTransportConfigTest(unittest.TestCase):
         self.assertIn('cJSON_GetObjectItem(root, "gen")', BRAIN)
         self.assertIn("idle_protect", BRAIN)
         self.assertIn("pdMS_TO_TICKS(800)", BRAIN)
+        # Newer gen must not be rejected as stale (was !=, which locked listen).
+        self.assertIn("msg_gen < s_status_gen", BRAIN)
+        self.assertNotIn("msg_gen != s_status_gen", BRAIN)
         think = re.search(
             r'if \(strcmp\(st, "thinking"\) == 0 \|\| strcmp\(st, "speaking"\).*?'
             r'\{(.*?)\n            \} else if \(strcmp\(st, "idle"\)',
@@ -131,6 +134,24 @@ class BrainTransportConfigTest(unittest.TestCase):
         )
         self.assertIsNotNone(end)
         self.assertIn("idle_protect", end.group(1))
+
+
+    def test_radio_stop_aborts_pcm_play(self):
+        """pcm:// YouTube sets s_playing via play_pcm16; radio_stop used to
+        clear only s_radio and left the mic uplink muted forever."""
+        audio = (FIRMWARE / "main/app/app_audio.c").read_text(encoding="utf-8")
+        stop = re.search(
+            r"void app_audio_radio_stop\(void\)\s*\{(.*?)\n\}",
+            audio,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(stop)
+        self.assertIn("app_audio_play_abort()", stop.group(1))
+        idle_idx = BRAIN.find('strcmp(st, "idle") == 0)')
+        while idle_idx >= 0 and "app_audio_radio_stop" not in BRAIN[idle_idx : idle_idx + 300]:
+            idle_idx = BRAIN.find('strcmp(st, "idle") == 0)', idle_idx + 1)
+        self.assertGreaterEqual(idle_idx, 0)
+        self.assertIn("request_abort_play()", BRAIN[idle_idx : idle_idx + 300])
 
 
 if __name__ == "__main__":

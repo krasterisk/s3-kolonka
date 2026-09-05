@@ -30,6 +30,9 @@ class FirmwareVersionTest(unittest.TestCase):
         self.assertIn('app_version.h', SETTINGS)
         self.assertIn("KOLONKA_VERSION_FULL", SETTINGS)
         self.assertIn("Прошивка ", SETTINGS)
+        # Must sit above the forget button / nav dots (was -14, covered dots).
+        self.assertIn("LV_ALIGN_BOTTOM_MID, 0, -78", SETTINGS)
+        self.assertNotIn("LV_ALIGN_BOTTOM_MID, 0, -14", SETTINGS)
 
 
 if __name__ == "__main__":

@@ -102,6 +102,32 @@ class TurnAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(backend.chunks), before + 1)
 
 
+
+    async def test_stop_radio_cancels_in_flight_turn(self):
+        backend = SlowTurn()
+        statuses = []
+
+        async def on_status(state, detail="", heard="", reply="", gen=None):
+            statuses.append((state, gen, reply))
+
+        await backend.start(lambda _d: None, on_status)
+        await backend.listen()
+        await backend.send_pcm(b"\x00\x00" * 2000)
+        await backend.stop()
+        await asyncio.wait_for(backend.started.wait(), timeout=0.2)
+        self.assertTrue(backend._busy)
+        gen_before = backend._gen
+
+        await backend.stop_radio()
+        self.assertFalse(backend._busy)
+        self.assertEqual(backend._gen, gen_before + 1)
+        self.assertTrue(backend._turn_task.done())
+        self.assertEqual(statuses[-1][0], "idle")
+        self.assertEqual(statuses[-1][1], backend._gen)
+        self.assertIn("Радио", statuses[-1][2])
+        backend.release.set()  # in case cancel didn't run finally before waiters
+
+
 class PrepareYoutubeTest(unittest.IsolatedAsyncioTestCase):
     async def test_prepare_skips_unavailable_then_returns_playable(self):
         from pathlib import Path

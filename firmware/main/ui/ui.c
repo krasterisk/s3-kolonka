@@ -111,8 +111,11 @@ static const char *friendly_status(void)
         return "Нет связи";
     }
     const char *b = app_brain_status();
-    if (strstr(b, "thinking") || strstr(b, "stt") || strstr(b, "live")) {
+    if (strstr(b, "thinking") || strstr(b, "stt")) {
         return "Думаю";
+    }
+    if (strstr(b, "live")) {
+        return "Слушаю";
     }
     if (strstr(b, "speaking") || strstr(b, "tts")) {
         return "Говорю";
@@ -158,8 +161,10 @@ void ui_handle_listen_click(void)
         ui_set_asleep(false);
     }
     app_brain_set_wake_mode(false);
-    if (next && app_audio_is_radio()) {
-        app_audio_radio_stop();
+    if (next && (app_audio_is_radio() || app_audio_is_playing())) {
+        /* Must tell the gateway — local-only stop left pcm:// pumping and
+         * re-armed s_playing, which muted every later mic uplink. */
+        app_brain_radio_stop();
     }
     app_audio_set_listen(next);
     app_brain_set_listen(next);

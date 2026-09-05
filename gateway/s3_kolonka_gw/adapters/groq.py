@@ -216,9 +216,22 @@ class GroqBackend(VoiceBackend):
 
     async def stop_radio(self):
         log.info("radio stop")
+        # Bump gen + cancel the turn that is still pumping YouTube/radio.
+        # Without this, a late idle/thinking from the same gen races the next
+        # listen and the device flashes Слушаю→Готов with listen_bytes=0.
+        self._gen += 1
         self._pcm_epoch = -1
+        self._listening = False
         await self._kill_radio()
-        await self.status("idle", "groq", reply="Радио выключено.")
+        task = self._turn_task
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._busy = False
+        await self.status("idle", "groq", reply="Радио выключено.", gen=self._gen)
 
     async def _kill_radio(self):
         procs = [self._radio_proc, self._ytdlp_proc]

@@ -616,10 +616,10 @@ void app_audio_radio_stop(void)
     }
     set_radio(false);
     s_radio_http = false;
+    /* pcm:// YouTube leaves s_playing true via play_pcm16; clearing only
+     * s_radio left the mic uplink muted forever (is_playing gate). */
+    app_audio_play_abort();
     aec_reset();
-    if (!s_playing) {
-        pa_off();
-    }
 }
 
 bool app_audio_radio_start(const char *url)
