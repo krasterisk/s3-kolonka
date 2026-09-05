@@ -432,7 +432,7 @@ static void brain_task(void *arg)
                      (unsigned)esp_get_free_heap_size(),
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                      brain_uri());
-            /* Pin WS RX next to LWIP (core 0), above AFE feed (prio 5).
+            /* Pin WS RX next to LWIP (core 0), above afe_feed (prio 4).
              * task_core_id is ignored unless task_core_id_set is true (1.7+). */
             esp_websocket_client_config_t cfg = {
                 .uri = s_brain_uri,
@@ -445,13 +445,9 @@ static void brain_task(void *arg)
                 .task_prio = 6,
                 .task_core_id = 0,
                 .task_core_id_set = true,
-                .network_timeout_ms = 10000,
+                .network_timeout_ms = 60000,
                 .reconnect_timeout_ms = 3000,
                 .disable_auto_reconnect = true,
-                .keep_alive_enable = true,
-                .keep_alive_idle = 5,
-                .keep_alive_interval = 5,
-                .keep_alive_count = 3,
                 .ping_interval_sec = 15,
                 .pingpong_timeout_sec = 90,
             };
@@ -485,6 +481,7 @@ static void brain_task(void *arg)
                 s_listen = false;
                 app_audio_set_listen(false);
             }
+            drain_text();
             flush_uplink();
             flush_text();
             set_status("Brain: connecting");
@@ -552,6 +549,9 @@ void app_brain_start(void)
     s_txt_rb = xRingbufferCreateWithCaps(8 * 1024, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
     if (!s_txt_rb) {
         s_txt_rb = xRingbufferCreate(4 * 1024, RINGBUF_TYPE_NOSPLIT);
+    }
+    if (!s_txt_rb) {
+        ESP_LOGE(TAG, "text ring alloc fail");
     }
     app_audio_set_mic_sink(mic_sink);
     /* Both on core 1. Core 0 is Wi-Fi/LWIP; a listen send loop there drops TCP. */
