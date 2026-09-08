@@ -67,6 +67,11 @@ def radio_drop_for_live(sent_bytes, elapsed_s, max_lead_s=RADIO_MAX_LEAD_S, samp
     return pcm16_realtime_s(sent_bytes, sample_rate) - elapsed_s > max_lead_s
 
 
+def radio_pace_sleep_s(sent_bytes, elapsed_s, max_lead_s=RADIO_MAX_LEAD_S, sample_rate=16000):
+    lead = pcm16_realtime_s(sent_bytes, sample_rate) - elapsed_s - max_lead_s
+    return lead if lead > 0 else 0.0
+
+
 def ffmpeg_radio_cmd(url, sample_rate=16000, ffmpeg=None):
     raw = (url or "").strip()
     if not raw.startswith("http://") and not raw.startswith("https://"):

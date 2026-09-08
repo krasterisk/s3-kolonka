@@ -26,6 +26,13 @@ class WakeTest(unittest.TestCase):
         self.assertIn("слышишь", rest.lower())
 
 
+class VadTimeoutTest(unittest.TestCase):
+    def test_silence_allows_pause_between_words(self):
+        from s3_kolonka_gw.adapters import groq
+
+        self.assertGreaterEqual(groq._SILENCE_MS, 2000)
+
+
 class DeviceCtrlTest(unittest.TestCase):
     def test_quieter(self):
         cmds = heuristic_commands("сделай потише", 50, 70)

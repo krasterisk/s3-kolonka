@@ -7,6 +7,7 @@ from s3_kolonka_gw.pcmutil import (
     pcm16_realtime_s,
     pcm16_rms,
     radio_drop_for_live,
+    radio_pace_sleep_s,
 )
 
 
@@ -47,6 +48,11 @@ class FfmpegRadioCmdTest(unittest.TestCase):
         self.assertFalse(radio_drop_for_live(640, 0.01))
         self.assertTrue(radio_drop_for_live(6400, 0.01))
         self.assertFalse(radio_drop_for_live(6400, 0.25))
+
+    def test_paces_file_instead_of_dropping(self):
+        self.assertEqual(radio_pace_sleep_s(640, 0.01), 0.0)
+        self.assertGreater(radio_pace_sleep_s(6400, 0.01), 0.0)
+        self.assertEqual(radio_pace_sleep_s(6400, 0.25), 0.0)
 
 
 if __name__ == "__main__":

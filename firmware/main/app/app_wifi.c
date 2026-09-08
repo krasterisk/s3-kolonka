@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -211,7 +212,11 @@ static int scan_options(char *out, size_t out_len)
         n = 24;
     }
 
-    wifi_ap_record_t *aps = calloc(n, sizeof(*aps));
+    wifi_ap_record_t *aps = heap_caps_calloc(n, sizeof(*aps),
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!aps) {
+        aps = calloc(n, sizeof(*aps));
+    }
     if (!aps) {
         return snprintf(out, out_len, "<option value=\"\">(no memory)</option>");
     }
@@ -261,14 +266,38 @@ static esp_err_t logo_get(httpd_req_t *req)
                            (ssize_t)(logo_png_end - logo_png_start));
 }
 
+static void *portal_alloc(size_t bytes)
+{
+    void *p = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!p) {
+        p = malloc(bytes);
+    }
+    return p;
+}
+
+static const char s_page_fallback[] =
+    "<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>s3-kolonka</title></head>"
+    "<body style='margin:0;background:#101418;color:#f2f4f8;"
+    "font-family:sans-serif;padding:24px'>"
+    "<h1>s3-kolonka</h1>"
+    "<p>Только сети 2.4 ГГц.</p>"
+    "<form method='POST' action='/save'>"
+    "<p>SSID<br><input name='ssid_manual' required></p>"
+    "<p>Пароль<br><input type='password' name='pass'></p>"
+    "<p><button type='submit'>Сохранить и перезагрузить</button></p>"
+    "</form></body></html>";
+
 static esp_err_t page_get(httpd_req_t *req)
 {
-    char *page = malloc(12288);
-    char *opts = malloc(3072);
+    char *page = portal_alloc(12288);
+    char *opts = portal_alloc(3072);
     if (!page || !opts) {
         free(page);
         free(opts);
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom");
+        httpd_resp_set_type(req, "text/html");
+        return httpd_resp_send(req, s_page_fallback, HTTPD_RESP_USE_STRLEN);
     }
     scan_options(opts, 3072);
     snprintf(page, 12288,

@@ -111,8 +111,11 @@ static const char *friendly_status(void)
         return "Нет связи";
     }
     const char *b = app_brain_status();
-    if (strstr(b, "thinking") || strstr(b, "stt") || strstr(b, "live")) {
+    if (strstr(b, "thinking") || strstr(b, "stt")) {
         return "Думаю";
+    }
+    if (strstr(b, "live")) {
+        return "Слушаю";
     }
     if (strstr(b, "speaking") || strstr(b, "tts")) {
         return "Говорю";
@@ -120,9 +123,11 @@ static const char *friendly_status(void)
     if (strstr(b, "radio")) {
         return "Радио";
     }
+    if (strstr(b, "connecting")) {
+        return "Связь";
+    }
     if (strstr(b, "down") || strstr(b, "error") || strstr(b, "err ") ||
-        strstr(b, "fail") || strstr(b, "retry") || strstr(b, "wait wifi") ||
-        strstr(b, "connecting")) {
+        strstr(b, "fail") || strstr(b, "retry") || strstr(b, "wait wifi")) {
         return "Нет связи";
     }
     if (!app_brain_ready()) {
@@ -156,8 +161,10 @@ void ui_handle_listen_click(void)
         ui_set_asleep(false);
     }
     app_brain_set_wake_mode(false);
-    if (next && app_audio_is_radio()) {
-        app_audio_radio_stop();
+    if (next && (app_audio_is_radio() || app_audio_is_playing())) {
+        /* Must tell the gateway — local-only stop left pcm:// pumping and
+         * re-armed s_playing, which muted every later mic uplink. */
+        app_brain_radio_stop();
     }
     app_audio_set_listen(next);
     app_brain_set_listen(next);
@@ -312,16 +319,23 @@ void ui_tick(void)
     int value = 0;
     if (app_brain_take_cmd(cmd, sizeof(cmd), &value)) {
         if (strcmp(cmd, "radio_play") == 0) {
-            const char *url = app_brain_cmd_url();
-            const char *title = app_brain_cmd_title();
-            if (app_audio_radio_start(url)) {
-                if (title && title[0]) {
-                    strncpy(s_radio_title, title, sizeof(s_radio_title) - 1);
-                    s_radio_title[sizeof(s_radio_title) - 1] = 0;
-                    ui_home_set_reply(s_radio_title);
+            /* A late radio_play after the user re-opened listen would set
+             * s_radio and mute the mic while the UI still says «Слушаю». */
+            if (app_audio_is_listening()) {
+                ESP_LOGW("ui", "ignore radio_play while listening");
+            } else {
+                const char *url = app_brain_cmd_url();
+                const char *title = app_brain_cmd_title();
+                if (app_audio_radio_start(url)) {
+                    if (title && title[0]) {
+                        strncpy(s_radio_title, title, sizeof(s_radio_title) - 1);
+                        s_radio_title[sizeof(s_radio_title) - 1] = 0;
+                    }
+                    ui_home_set_heard("");
+                    ui_home_set_reply("");
+                    ui_media_set_playing(true, s_radio_title[0] ? s_radio_title : title);
+                    ui_go_page(UI_PAGE_MEDIA);
                 }
-                ui_media_set_playing(true, s_radio_title[0] ? s_radio_title : title);
-                ui_go_page(UI_PAGE_MEDIA);
             }
         } else if (strcmp(cmd, "radio_stop") == 0) {
             ui_handle_radio_stop();

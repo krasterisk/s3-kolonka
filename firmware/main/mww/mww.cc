@@ -24,6 +24,7 @@ static constexpr int kStrideSamples = 160;
 static constexpr int kSlidingWindow = 5;
 static constexpr int kMinSlicesBeforeDetect = 20;
 static constexpr uint8_t kCutoff = 247; /* 0.97 * 255 */
+static uint8_t s_cutoff = kCutoff;
 static constexpr size_t kPreArenaSize = 16 * 1024;
 static constexpr size_t kStreamArenaSize = 48 * 1024;
 static constexpr size_t kVarArenaSize = 1024;
@@ -100,6 +101,11 @@ void mww_reset(void)
     reset_probs();
 }
 
+void mww_set_cutoff(uint8_t cutoff)
+{
+    s_cutoff = cutoff < 200 ? 200 : cutoff;
+}
+
 static bool features_from_window(const int16_t *window, int8_t *features)
 {
     TfLiteTensor *input = s_pre->input(0);
@@ -132,7 +138,7 @@ static bool stream_infer(const int8_t *features)
     TfLiteTensor *output = s_stream->output(0);
     s_recent_i = (s_recent_i + 1) % kSlidingWindow;
     s_recent[s_recent_i] = output->data.uint8[0];
-    if (s_recent[s_recent_i] < kCutoff) {
+    if (s_recent[s_recent_i] < s_cutoff) {
         s_ignore = std::min<int16_t>(static_cast<int16_t>(s_ignore + 1), 0);
     }
     return true;
@@ -149,7 +155,7 @@ static bool detected(void)
         sum += s_recent[i];
         max_p = std::max(max_p, s_recent[i]);
     }
-    if (sum > static_cast<uint32_t>(kCutoff) * kSlidingWindow) {
+    if (sum > static_cast<uint32_t>(s_cutoff) * kSlidingWindow) {
         ESP_LOGI(TAG, "hit avg=%u max=%u", (unsigned)(sum / kSlidingWindow), (unsigned)max_p);
         return true;
     }

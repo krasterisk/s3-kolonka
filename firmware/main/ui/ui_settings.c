@@ -1,6 +1,7 @@
 #include "ui_pages.h"
 
 #include "app_audio.h"
+#include "app_version.h"
 #include "app_wifi.h"
 #include "fonts.h"
 #include "ui_theme.h"
@@ -113,6 +114,12 @@ void ui_settings_create(lv_obj_t *parent)
     lv_obj_set_style_text_font(fl, &font_ru_12, 0);
     lv_obj_center(fl);
 
+    /* Above the forget button — was -14 and covered the nav dots. */
+    lv_obj_t *ver = lv_label_create(parent);
+    lv_label_set_text(ver, "Прошивка " KOLONKA_VERSION_FULL);
+    lv_obj_set_style_text_color(ver, lv_color_hex(UI_COLOR_MUTED), 0);
+    lv_obj_set_style_text_font(ver, &font_ru_12, 0);
+    lv_obj_align(ver, LV_ALIGN_BOTTOM_MID, 0, -78);
 }
 
 void ui_settings_set_volume(int percent)

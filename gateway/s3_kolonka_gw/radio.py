@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,7 +16,8 @@ DEFAULTS = {
     "reject_hls": True,
     "bitrate_min": 128,
     "country_hint": "RU",
-    "limit": 8,
+    "limit": 10,
+    "search_timeout": 5,
 }
 
 PICKER_PROMPT = (
@@ -23,8 +25,48 @@ PICKER_PROMPT = (
     "Каталог: Radio Browser. Играем только MP3 Icecast, не HLS и не AAC.\n"
     "Пользователь сказал: %s\n"
     "Кандидаты (JSON): %s\n"
-    "Верни только JSON вида {\"uuid\":\"<stationuuid или null>\",\"title\":\"<имя>\"}.\n"
-    "uuid обязан быть из списка. Не выдумывай URL."
+    "Правила:\n"
+    "1. Почти точное имя — бери эту станцию.\n"
+    "2. Нет точной, но запрос жанр или близкое имя — включи похожую из списка "
+    "(теги, название, страна RU предпочтительнее).\n"
+    "3. Запрос конкретный, а похожих нет, или несколько совсем разных вариантов — "
+    "не угадывай: uuid=null и короткое ask с двумя именами из списка.\n"
+    "4. uuid только из списка. Не выдумывай URL.\n"
+    "Ответ — только JSON "
+    "{\"uuid\":\"<stationuuid или null>\",\"title\":\"<имя>\",\"ask\":\"<уточнение или пусто>\"}."
+)
+
+_GENRE_TAG = (
+    ("металл", "metal"),
+    ("метал", "metal"),
+    ("metal", "metal"),
+    ("хип-хоп", "hiphop"),
+    ("хип хоп", "hiphop"),
+    ("классическ", "classical"),
+    ("классик", "classical"),
+    ("classical", "classical"),
+    ("электрон", "electronic"),
+    ("шансон", "chanson"),
+    ("новост", "news"),
+    ("ретро", "oldies"),
+    ("джаз", "jazz"),
+    ("jazz", "jazz"),
+    ("дэнс", "dance"),
+    ("dance", "dance"),
+    ("поп", "pop"),
+    ("pop", "pop"),
+    ("рок", "rock"),
+    ("rock", "rock"),
+)
+
+_ALIASES = (
+    ("европа плюс", ("europa plus", "europa+")),
+    ("серебряный дождь", ("silver rain", "серебряный дождь")),
+    ("рок фм", ("rock fm",)),
+    ("маяк", ("radio mayak", "mayak", "маяк")),
+    ("наше радио", ("nashe radio", "наше радио")),
+    ("авторадио", ("avtoradio", "авторадио")),
+    ("дорожное", ("dorozhnoe radio",)),
 )
 
 
@@ -35,6 +77,7 @@ def normalize_config(cfg=None):
     out["base_url"] = str(out["base_url"]).rstrip("/")
     out["codec"] = str(out.get("codec") or "MP3")
     out["limit"] = int(out.get("limit") or 8)
+    out["search_timeout"] = int(out.get("search_timeout") or 5)
     out["bitrate_min"] = int(out.get("bitrate_min") or 0)
     out["hide_broken"] = bool(out.get("hide_broken", True))
     out["reject_hls"] = bool(out.get("reject_hls", True))
@@ -43,18 +86,77 @@ def normalize_config(cfg=None):
     return out
 
 
-def search_url(cfg, query):
+def normalize_query(text):
+    t = (text or "").strip().lower()
+    t = t.replace("ё", "е")
+    t = re.sub(r"[«»\"'`.,!?…:/\\|()\[\]]", " ", t)
+    t = re.sub(r"[-_]+", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    if t.startswith("радио ") or t == "радио":
+        t = t[5:].strip()
+    elif t.startswith("радио") and len(t) > 5:
+        t = t[5:].strip()
+    return t
+
+
+def genre_tag(query):
+    q = normalize_query(query)
+    if not q:
+        return None
+    for key, tag in _GENRE_TAG:
+        if key in q:
+            return tag
+    return None
+
+
+def search_plans(query, cfg):
     cfg = normalize_config(cfg)
+    q = normalize_query(query)
+    hint = cfg["country_hint"] or None
+    plans = []
+
+    def add(plan):
+        key = (plan.get("name") or "", plan.get("tag") or "", plan.get("countrycode") or "")
+        if key in seen:
+            return
+        if not plan.get("name") and not plan.get("tag"):
+            return
+        seen.add(key)
+        plans.append(plan)
+
+    seen = set()
+    if q:
+        add({"name": q, "countrycode": hint})
+        add({"name": q})
+        for alias, extras in _ALIASES:
+            if alias in q or q in alias:
+                for extra in extras:
+                    add({"name": extra, "countrycode": hint})
+                    add({"name": extra})
+        tag = genre_tag(q)
+        if tag:
+            add({"tag": tag, "countrycode": hint})
+            add({"tag": tag})
+    return plans
+
+
+def search_url(cfg, query, plan=None):
+    cfg = normalize_config(cfg)
+    if plan is None:
+        plan = {"name": query or "", "countrycode": cfg["country_hint"] or None}
     params = {
-        "name": query or "",
         "codec": cfg["codec"],
         "hidebroken": "true" if cfg["hide_broken"] else "false",
         "order": "votes",
         "reverse": "true",
         "limit": str(cfg["limit"] * 3),
     }
-    if cfg["country_hint"]:
-        params["countrycode"] = cfg["country_hint"]
+    if plan.get("name"):
+        params["name"] = plan["name"]
+    if plan.get("tag"):
+        params["tag"] = plan["tag"]
+    if plan.get("countrycode"):
+        params["countrycode"] = plan["countrycode"]
     return cfg["base_url"] + "/json/stations/search?" + urllib.parse.urlencode(params)
 
 
@@ -120,6 +222,7 @@ def filter_stations(raw, cfg):
                 "codec": codec,
                 "bitrate": bitrate,
                 "countrycode": (row.get("countrycode") or "").strip(),
+                "tags": (row.get("tags") or "").strip(),
             }
         )
         if len(out) >= cfg["limit"]:
@@ -141,15 +244,18 @@ def parse_picker_reply(text, candidates):
     except json.JSONDecodeError:
         return None
     uuid = (payload.get("uuid") or "").strip()
-    if not uuid or uuid not in by_uuid:
-        return None
-    chosen = dict(by_uuid[uuid])
-    title = (payload.get("title") or chosen["name"]).strip()
-    chosen["title"] = title
-    return chosen
+    ask = (payload.get("ask") or "").strip()
+    if uuid and uuid in by_uuid:
+        chosen = dict(by_uuid[uuid])
+        title = (payload.get("title") or chosen["name"]).strip()
+        chosen["title"] = title
+        return chosen
+    if ask:
+        return {"clarify": ask}
+    return None
 
 
-def fetch_json(url, cfg, opener=None):
+def fetch_json(url, cfg, opener=None, timeout=None):
     cfg = normalize_config(cfg)
     req = urllib.request.Request(
         url,
@@ -157,12 +263,33 @@ def fetch_json(url, cfg, opener=None):
         method="GET",
     )
     handle = opener or urllib.request.build_opener()
-    with handle.open(req, timeout=20) as resp:
+    wait = cfg["search_timeout"] if timeout is None else timeout
+    with handle.open(req, timeout=wait) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def search_stations(query, cfg, opener=None):
-    return fetch_json(search_url(cfg, query), cfg, opener=opener)
+def search_stations(query, cfg, opener=None, fetch_fn=None):
+    cfg = normalize_config(cfg)
+    fetch = fetch_fn or (lambda url: fetch_json(url, cfg, opener=opener))
+    seen = set()
+    rows = []
+    for plan in search_plans(query, cfg) or [{"name": query or ""}]:
+        url = search_url(cfg, query, plan=plan)
+        log.info("radio search q=%s %s", query, plan)
+        try:
+            chunk = fetch(url) or []
+        except Exception as exc:
+            log.warning("radio search failed %s: %s", plan, exc)
+            continue
+        for row in chunk:
+            uuid = (row.get("stationuuid") or row.get("uuid") or "").strip()
+            if not uuid or uuid in seen:
+                continue
+            seen.add(uuid)
+            rows.append(row)
+        if len(filter_stations(rows, cfg)) >= cfg["limit"]:
+            break
+    return rows
 
 
 def resolve_click(uuid, cfg, opener=None):
@@ -270,6 +397,8 @@ def resolve_station(query, cfg, search_fn=None, picker_fn=None, opener=None, pro
     else:
         picked = dict(cands[0])
         picked["title"] = picked.get("name")
+    if picked and picked.get("clarify") and not picked.get("uuid"):
+        return {"clarify": picked["clarify"]}
     if not picked:
         return None
     ordered = [picked] + [c for c in cands if c["uuid"] != picked["uuid"]]
