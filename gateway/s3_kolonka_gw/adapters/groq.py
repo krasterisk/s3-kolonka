@@ -390,20 +390,63 @@ class GroqBackend(VoiceBackend):
         return dest
 
     async def _stream_youtube(self, source: str):
+        """Play YouTube ASAP.
+
+        Cached files keep the old ffmpeg-file path. Uncached tracks stream via
+        yt-dlp|ffmpeg pipe so the first PCM is not blocked on a full download
+        (that wait made start feel broken and Stop races more likely).
+        """
+        cached = youtube.cached_file(source, self.youtube_cfg)
+        if cached:
+            try:
+                cmd = youtube.ffmpeg_file_cmd(str(cached))
+            except Exception as exc:
+                log.warning("youtube cmd: %s", exc)
+                await self.status("error", "youtube: %s" % exc)
+                return
+            log.info("youtube ffmpeg cache %s", cached)
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            self._radio_proc = proc
+            await self._pump_pcm(proc, pace=True)
+            return
+
         try:
-            path = await self._ensure_youtube_file(source)
-            cmd = youtube.ffmpeg_file_cmd(str(path))
+            ytdlp_cmd, ff_cmd = youtube.youtube_pcm_cmds(
+                source,
+                ytdlp=self.youtube_cfg.get("ytdlp") or "",
+                ffmpeg=self.youtube_cfg.get("ffmpeg") or "",
+            )
         except Exception as exc:
-            log.warning("youtube cmd: %s", exc)
+            log.warning("youtube pipe cmd: %s", exc)
             await self.status("error", "youtube: %s" % exc)
             return
-        log.info("youtube ffmpeg %s", path)
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
+        log.info("youtube pipe stream %s", source)
+        ytdlp = await asyncio.create_subprocess_exec(
+            *ytdlp_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True,
         )
+        self._ytdlp_proc = ytdlp
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ff_cmd,
+                stdin=ytdlp.stdout,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            await self._kill_radio()
+            raise
+        # Allow yt-dlp to receive SIGPIPE if ffmpeg exits first.
+        if ytdlp.stdout is not None:
+            ytdlp.stdout.close()
         self._radio_proc = proc
         await self._pump_pcm(proc, pace=True)
 
@@ -742,27 +785,35 @@ class GroqBackend(VoiceBackend):
             item["video_id"] = vid
             item["url"] = (item.get("url") or ("yt://%s" % vid)).strip()
             merged.append(item)
+        # Prefer cached ids (including previously played) so Stop→replay of the
+        # same query is instant. Only then try fresh unplayed, then played
+        # uncached. Do NOT pre-download here — _stream_youtube pipes uncached.
         skip = set(youtube.played_ids(query, self.youtube_cfg))
-        merged = youtube.rank_track_candidates(merged, query, exclude_ids=skip) or youtube.rank_track_candidates(
-            merged, query
-        )
+        ranked = youtube.rank_track_candidates(merged, query) or list(merged)
+        cached_rows = []
+        fresh = []
+        played_uncached = []
+        for row in ranked:
+            url = row.get("url") or ("yt://%s" % row.get("video_id"))
+            if youtube.cached_file(url, self.youtube_cfg):
+                cached_rows.append(row)
+            elif row.get("video_id") in skip:
+                played_uncached.append(row)
+            else:
+                fresh.append(row)
+        ordered = cached_rows + fresh + played_uncached
+        if not ordered:
+            ordered = youtube.rank_track_candidates(merged, query, exclude_ids=skip) or ranked
 
-        async def download(row):
-            await self._ensure_youtube_file(row["url"])
-
-        for row in merged[:8]:
-            try:
-                await download(row)
-            except Exception as exc:
-                log.warning("youtube skip %s: %s", row.get("video_id"), exc)
-                continue
+        for row in ordered[:8]:
             youtube.remember_played(query, row.get("video_id"), self.youtube_cfg)
             self._yt_last_query = youtube.strip_service_words(query)
             log.info(
-                "youtube pick %s %s q=%s",
+                "youtube pick %s %s q=%s cached=%s",
                 row.get("video_id"),
                 row.get("title"),
                 row.get("query") or query,
+                bool(youtube.cached_file(row.get("url"), self.youtube_cfg)),
             )
             return youtube.device_music_cmd(row)
         return None

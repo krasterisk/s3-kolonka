@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from unittest import mock
 
 from s3_kolonka_gw.adapters.groq import GroqBackend
 
@@ -294,7 +295,10 @@ class TurnAsyncTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(fake.wait_called)
 
 class PrepareYoutubeTest(unittest.IsolatedAsyncioTestCase):
-    async def test_prepare_skips_unavailable_then_returns_playable(self):
+    async def test_prepare_picks_without_predownload(self):
+        """Prepare must return a cmd immediately; streaming/pipe starts later.
+        Pre-download here made every YouTube start wait on yt-dlp and broke
+        fast Stop→replay."""
         from pathlib import Path
 
         from s3_kolonka_gw import youtube as yt
@@ -310,7 +314,6 @@ class PrepareYoutubeTest(unittest.IsolatedAsyncioTestCase):
             youtube_cfg={"cache_dir": str(cache)},
         )
         first = {"source": "yt://peDON2N4CoQ", "title": "ТУТХАМОН", "video_id": "peDON2N4CoQ"}
-        tried = []
 
         def fake_iter(query, cfg=None, search_fn=None):
             return [
@@ -318,24 +321,16 @@ class PrepareYoutubeTest(unittest.IsolatedAsyncioTestCase):
                 {"video_id": "tale01", "title": "Сказочный детектив", "url": "yt://tale01", "query": "сказочный детектив"},
             ]
 
-        async def fake_ensure(source):
-            tried.append(source)
-            if "peDON2N4CoQ" in source:
-                raise RuntimeError("ERROR: [youtube] peDON2N4CoQ: This video is not available")
-            return Path("/tmp/tale01")
+        async def fake_ensure(_source):
+            raise AssertionError("prepare must not pre-download")
 
-        orig = yt.iter_track_candidates
-        yt.iter_track_candidates = fake_iter
-        backend._ensure_youtube_file = fake_ensure
-        try:
+        with mock.patch.object(yt, "iter_track_candidates", fake_iter):
+            backend._ensure_youtube_file = fake_ensure
             ready = await backend._prepare_youtube("хрум или сказочный детектив", first)
-        finally:
-            yt.iter_track_candidates = orig
 
-        self.assertIn("yt://tale01", tried)
         self.assertEqual(ready["name"], "radio_play")
-        self.assertEqual(ready["source"], "yt://tale01")
-        self.assertEqual(ready["title"], "Сказочный детектив")
+        self.assertIn(ready["source"], ("yt://peDON2N4CoQ", "yt://tale01"))
+        self.assertTrue(ready.get("title"))
 
 
 if __name__ == "__main__":

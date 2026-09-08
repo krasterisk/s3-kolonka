@@ -212,8 +212,9 @@ void app_audio_flush_preroll(void)
 static void set_radio(bool on)
 {
     s_radio = on;
-    /* Radio leaks into the mics; a slightly lower bar still hears Hey Jarvis. */
-    mww_set_cutoff(on ? 238 : 247);
+    /* Media leaks into the mics; drop the bar further so barge-in still hears
+     * Hey Jarvis over YouTube/radio (community AEC+WakeNet practice). */
+    mww_set_cutoff(on ? 220 : 247);
 }
 
 static void maybe_wake(const int16_t *mono, int frames)
@@ -362,6 +363,13 @@ static void afe_feed_task(void *arg)
                 /* STT uses raw mic; AFE after radio/TTS gates the voice as echo. */
                 handle_mono(wake_mono, samples, false);
             }
+        } else if (wake_mono && !s_listen && (s_playing || s_radio)) {
+            /* Soft AEC wake during media: AFE alone often over-cancels speech
+             * over music (xiaozhi/ESP-SR barge-in). Dual-path keeps wake alive. */
+            for (int i = 0; i < samples; i++) {
+                wake_mono[i] = aec_cancel(buf[ch * i + MIC_L_CH], buf[ch * i + MIC_REF_CH]);
+            }
+            maybe_wake(wake_mono, samples);
         }
     }
 }
@@ -388,9 +396,8 @@ static void afe_fetch_task(void *arg)
         if (!(s_listen && !s_radio)) {
             handle_mono(mono, n, false);
         }
-        if (s_playing || s_radio) {
-            maybe_wake(mono, n);
-        }
+        /* Wake during media is handled by the soft-AEC path in afe_feed —
+         * do not also feed AFE audio into MWW (double-rate breaks the detector). */
     }
 }
 
